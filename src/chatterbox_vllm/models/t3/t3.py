@@ -296,6 +296,9 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
         self.cfg_scale = float(os.environ.get("CHATTERBOX_CFG_SCALE", "0.5"))
         print("Applying CFG scale:", self.cfg_scale)
 
+        # Tracks the absolute position of the start-of-speech token (PREFILL_END_TOKEN)
+        # so we can compute speech positional embedding indices during decode.
+        self._speech_start_position: Optional[int] = None
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loaded_params: set[str] = set()
@@ -634,10 +637,28 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
 
         # Split the inputs_embeds into the three parts
         cond_embeds, uncond_embeds = inputs_embeds.split([self.dim, self.dim], dim=1)
-        # print("t3/cond_embeds", cond_embeds.shape, cond_embeds.dtype)
-        # print("t3/uncond_embeds", uncond_embeds.shape, uncond_embeds.dtype)
 
-        # TODO: Apply speech positional embeddings here
+        # Track the absolute position of the start-of-speech token during prefill,
+        # so we can compute speech positional indices during decode.
+        if input_ids is not None:
+            end_mask = (input_ids == PREFILL_END_TOKEN)
+            if end_mask.any():
+                idx = end_mask.nonzero(as_tuple=True)[0][-1]
+                self._speech_start_position = positions[idx].item()
+
+        # Apply learned speech positional embeddings to decode (speech) tokens.
+        # Prefill tokens already have positional embeddings from get_input_embeddings().
+        if self._speech_start_position is not None and input_ids is not None:
+            decode_mask = (input_ids >= SPEECH_TOKEN_OFFSET)
+            if decode_mask.any():
+                speech_positions = (positions - self._speech_start_position).clamp(
+                    0, self.precomputed_speech_pos_emb.shape[0] - 1
+                )
+                pos_embs = self.precomputed_speech_pos_emb[speech_positions]
+                # Zero out for non-decode tokens (they already have pos embs from prefill)
+                pos_embs = pos_embs * decode_mask.unsqueeze(1).float()
+                cond_embeds = cond_embeds + pos_embs
+                uncond_embeds = uncond_embeds + pos_embs
 
         hidden_states = self.tfmr(
             input_ids=None,
