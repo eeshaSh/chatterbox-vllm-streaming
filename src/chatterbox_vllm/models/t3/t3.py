@@ -640,12 +640,10 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
         if inputs_embeds is None:
             # inputs_embeds is None in two cases:
             # 1. Profiling/dummy run: vLLM passes text-range token IDs (< SPEECH_TOKEN_OFFSET)
-            #    without multimodal processing. We can't do CFG doubling because vLLM's
-            #    attention metadata is only prepared for N tokens, not 2N.
-            # 2. Normal decode: vLLM passes speech token IDs (>= SPEECH_TOKEN_OFFSET) and
-            #    expects the model to handle embedding lookup + CFG doubling.
-            is_dummy_run = input_ids is not None and torch.max(input_ids) < SPEECH_TOKEN_OFFSET
-            if is_dummy_run:
+            # 2. Normal decode: vLLM passes speech token IDs (>= SPEECH_TOKEN_OFFSET)
+            is_profiling = input_ids is not None and torch.any(input_ids < SPEECH_TOKEN_OFFSET)
+            if is_profiling:
+                # Profiling run — run backbone once with dummy embeddings, no CFG doubling.
                 dummy_embeds = torch.zeros(
                     len(input_ids), self.dim,
                     device=input_ids.device, dtype=next(self.tfmr.parameters()).dtype
@@ -657,45 +655,58 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
                     inputs_embeds=dummy_embeds,
                 )
                 return torch.cat([hidden_states, hidden_states], dim=1)
-            else:
-                inputs_embeds = self.get_input_embeddings(input_ids, [])
 
-        # Split the inputs_embeds into the three parts
+            # Decode path: cond and uncond embeddings are identical (same speech token).
+            # Run transformer once and duplicate the output to avoid doubling positions
+            # along dim=0, which causes attention backend assertion failures.
+            embeds = self.speech_emb(
+                torch.clamp(input_ids - SPEECH_TOKEN_OFFSET, 0, self.speech_emb.num_embeddings - 1)
+            )
+
+            # Apply speech positional embeddings during decode
+            if self._speech_start_position is not None:
+                speech_positions = (positions - self._speech_start_position).clamp(
+                    0, self.precomputed_speech_pos_emb.shape[0] - 1
+                )
+                embeds = embeds + self.precomputed_speech_pos_emb[speech_positions]
+
+            hidden_states = self.tfmr(
+                input_ids=None,
+                positions=positions,
+                intermediate_tensors=None,
+                inputs_embeds=embeds,
+            )
+            return torch.cat([hidden_states, hidden_states], dim=1)
+
+        # Prefill path (inputs_embeds provided by multimodal pipeline).
+        # cond and uncond embeddings differ (text vs zeros for CFG).
         cond_embeds, uncond_embeds = inputs_embeds.split([self.dim, self.dim], dim=1)
 
-        # Track the absolute position of the start-of-speech token during prefill,
-        # so we can compute speech positional indices during decode.
+        # Track the start-of-speech position for speech positional embeddings during decode.
         if input_ids is not None:
             end_mask = (input_ids == PREFILL_END_TOKEN)
             if end_mask.any():
                 idx = end_mask.nonzero(as_tuple=True)[0][-1]
                 self._speech_start_position = positions[idx].item()
 
-        # Apply learned speech positional embeddings to decode (speech) tokens.
-        # Prefill tokens already have positional embeddings from get_input_embeddings().
-        if self._speech_start_position is not None and input_ids is not None:
-            decode_mask = (input_ids >= SPEECH_TOKEN_OFFSET)
-            if decode_mask.any():
-                speech_positions = (positions - self._speech_start_position).clamp(
-                    0, self.precomputed_speech_pos_emb.shape[0] - 1
-                )
-                pos_embs = self.precomputed_speech_pos_emb[speech_positions]
-                # Zero out for non-decode tokens (they already have pos embs from prefill)
-                pos_embs = pos_embs * decode_mask.unsqueeze(1).float()
-                cond_embeds = cond_embeds + pos_embs
-                uncond_embeds = uncond_embeds + pos_embs
-
-        hidden_states = self.tfmr(
+        # Run uncond FIRST, then cond. Both calls write to the same KV cache slots
+        # (same positions). The second call's K/V values overwrite the first's.
+        # By running cond last, the KV cache retains text-conditioned values,
+        # so decode steps attend to text-following context rather than unconditional.
+        uncond_hidden = self.tfmr(
             input_ids=None,
-            positions=torch.cat([positions, positions], dim=0),
+            positions=positions,
             intermediate_tensors=None,
-            inputs_embeds=torch.cat([cond_embeds, uncond_embeds], dim=0)
+            inputs_embeds=uncond_embeds,
         )
-        # print("t3/hidden_states", hidden_states.shape, hidden_states.dtype)
+        cond_hidden = self.tfmr(
+            input_ids=None,
+            positions=positions,
+            intermediate_tensors=None,
+            inputs_embeds=cond_embeds,
+        )
 
-        # Reconcatenate the hidden states into the master tensor
-        hidden_state_1, hidden_state_2 = hidden_states.split([len(cond_embeds), len(uncond_embeds)], dim=0)
-        return torch.cat([hidden_state_1, hidden_state_2], dim=1)
+        return torch.cat([cond_hidden, uncond_hidden], dim=1)
 
     def get_language_model(self) -> torch.nn.Module:
         return self.tfmr
