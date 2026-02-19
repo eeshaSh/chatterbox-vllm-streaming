@@ -10,7 +10,11 @@ from functools import lru_cache
 
 import librosa
 import numpy as np
-import perth
+try:
+    import perth
+    _PERTH_AVAILABLE = perth.PerthImplicitWatermarker is not None
+except (ImportError, AttributeError):
+    _PERTH_AVAILABLE = False
 import torch
 import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
@@ -92,7 +96,7 @@ class ChatterboxTTS:
         self.ve = ve
         self.default_conds = default_conds
         self.variant = variant
-        self.watermarker = perth.PerthImplicitWatermarker()
+        self.watermarker = perth.PerthImplicitWatermarker() if _PERTH_AVAILABLE else None
 
     @property
     def sr(self) -> int:
@@ -439,10 +443,11 @@ class ChatterboxTTS:
             fade_in = np.linspace(0.0, 1.0, fade_samples, dtype=audio_chunk.dtype)
             audio_chunk[:fade_samples] *= fade_in
 
-        # Compute audio duration and apply watermark
+        # Compute audio duration and apply watermark if available
         audio_duration = len(audio_chunk) / self.sr
-        watermarked_chunk = self.watermarker.apply_watermark(audio_chunk, sample_rate=self.sr)
-        audio_tensor = torch.from_numpy(watermarked_chunk).unsqueeze(0)
+        if self.watermarker is not None:
+            audio_chunk = self.watermarker.apply_watermark(audio_chunk, sample_rate=self.sr)
+        audio_tensor = torch.from_numpy(audio_chunk).unsqueeze(0)
 
         # Update first-chunk latency metric
         if metrics.chunk_count == 0:
