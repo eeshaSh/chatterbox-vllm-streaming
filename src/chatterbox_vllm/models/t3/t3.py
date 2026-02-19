@@ -436,7 +436,7 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
             #     print("SPEECH_TOKEN_OFFSET", SPEECH_TOKEN_OFFSET)
             #     raise ValueError("input_ids is less than SPEECH_TOKEN_OFFSET")
 
-            embeds = self.speech_emb(input_ids - SPEECH_TOKEN_OFFSET)
+            embeds = self.speech_emb(torch.clamp(input_ids - SPEECH_TOKEN_OFFSET, 0, self.speech_emb.num_embeddings - 1))
 
             out = torch.cat([embeds, embeds], dim=1)
 

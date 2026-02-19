@@ -12,7 +12,7 @@ import os
 app = FastAPI()
 
 print("Loading model on cuda...")
-model = ChatterboxTTS.from_pretrained(max_batch_size=1)
+model = ChatterboxTTS.from_pretrained()
 print("Model loaded.")
 
 SAMPLE_RATE = model.sr  # 24000
