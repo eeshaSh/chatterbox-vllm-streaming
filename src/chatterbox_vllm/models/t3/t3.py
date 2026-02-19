@@ -683,11 +683,14 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
                     input_ids=None,
                     positions=positions,
                     intermediate_tensors=None,
-                    inputs_embeds=embeds,
+                    inputs_embeds=embeds.to(dtype=next(self.tfmr.parameters()).dtype),
                 )
                 return torch.cat([hidden_states, hidden_states], dim=1)
 
         # Prefill path — inputs_embeds has shape [seq_len, 2*dim] with cond||uncond.
+        # Cast to transformer dtype (embedding layers are float32, transformer is bfloat16).
+        tfmr_dtype = next(self.tfmr.parameters()).dtype
+        inputs_embeds = inputs_embeds.to(dtype=tfmr_dtype)
         cond_embeds, uncond_embeds = inputs_embeds.split([self.dim, self.dim], dim=1)
 
         # Track the start-of-speech position for speech positional embeddings during decode.
