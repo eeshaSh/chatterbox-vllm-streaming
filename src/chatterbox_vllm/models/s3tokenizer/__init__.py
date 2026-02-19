@@ -36,8 +36,8 @@ _LENGTH_TENSOR = torch.tensor(1000 + 1)  # max_new_tokens
 
 def drop_invalid_tokens(x):
     """Returns only tokens between SOS and EOS using a mask. No syncs."""
-    assert x.dim() == 1 or (x.dim() == 2 and x.size(0) == 1)
-    x = x.squeeze(0)
+    assert x.dim() <= 2
+    x = x.flatten()
 
     length = x.size(0)
     idx = torch.arange(length, device=x.device)
