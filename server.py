@@ -42,7 +42,7 @@ def make_wav_header(sample_rate: int, num_channels: int, bits_per_sample: int) -
     )
 
 
-def audio_stream(
+async def audio_stream(
     text: str,
     audio_prompt_path: Optional[str] = None,
     language_id: str = "en",
@@ -52,11 +52,11 @@ def audio_stream(
     diffusion_steps: int = 10,
     output_format: str = "pcm",
 ):
-    """Generator that yields PCM bytes (or WAV with header) from streaming TTS."""
+    """Async generator that yields PCM bytes (or WAV with header) from streaming TTS."""
     if output_format == "wav":
         yield make_wav_header(SAMPLE_RATE, NUM_CHANNELS, SAMPLE_WIDTH * 8)
 
-    for audio_chunk, metrics in model.generate_stream(
+    async for audio_chunk, metrics in model.generate_stream(
         text=text,
         audio_prompt_path=audio_prompt_path,
         language_id=language_id,
@@ -128,9 +128,9 @@ async def tts_post(
         tmp_file.close()
         audio_prompt_path = tmp_file.name
 
-    def stream_and_cleanup():
+    async def stream_and_cleanup():
         try:
-            yield from audio_stream(
+            async for chunk in audio_stream(
                 text=text,
                 audio_prompt_path=audio_prompt_path,
                 language_id=language_id,
@@ -139,7 +139,8 @@ async def tts_post(
                 chunk_size=chunk_size,
                 diffusion_steps=diffusion_steps,
                 output_format=format,
-            )
+            ):
+                yield chunk
         finally:
             if tmp_file is not None:
                 os.unlink(tmp_file.name)

@@ -1,10 +1,13 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union, Tuple, Any, Generator
+from typing import Optional, Union, Tuple, Any, AsyncGenerator
+import asyncio
 import time
 import uuid
 
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
+from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.sampling_params import RequestOutputKind
 from functools import lru_cache
 
@@ -75,13 +78,13 @@ class ChatterboxTTS:
     DEC_COND_LEN = 10 * S3GEN_SR
 
     def __init__(self, target_device: str, max_model_len: int,
-                 t3: LLM, t3_config: T3Config, t3_cond_enc: T3CondEnc, 
+                 async_engine: AsyncLLMEngine, t3_config: T3Config, t3_cond_enc: T3CondEnc,
                  t3_speech_emb: torch.nn.Embedding, t3_speech_pos_emb: LearnedPositionEmbeddings,
                  s3gen: S3Gen, ve: VoiceEncoder, default_conds: Conditionals,
                  variant: str = "english"):
         self.target_device = target_device
         self.max_model_len = max_model_len
-        self.t3 = t3
+        self.async_engine = async_engine
         self.t3_config = t3_config
         self.t3_cond_enc = t3_cond_enc
         self.t3_speech_emb = t3_speech_emb
@@ -146,7 +149,8 @@ class ChatterboxTTS:
             "max_model_len": max_model_len,
         }
 
-        t3 = LLM(**{**base_vllm_kwargs, **kwargs})
+        engine_args = AsyncEngineArgs(**{**base_vllm_kwargs, **kwargs})
+        async_engine = AsyncLLMEngine.from_engine_args(engine_args)
 
         ve = VoiceEncoder()
         ve.load_state_dict(load_file(ckpt_dir / "ve.safetensors"))
@@ -161,7 +165,7 @@ class ChatterboxTTS:
 
         return cls(
             target_device=target_device, max_model_len=max_model_len,
-            t3=t3, t3_config=t3_config, t3_cond_enc=t3_enc, t3_speech_emb=t3_speech_emb, t3_speech_pos_emb=t3_speech_pos_emb,
+            async_engine=async_engine, t3_config=t3_config, t3_cond_enc=t3_enc, t3_speech_emb=t3_speech_emb, t3_speech_pos_emb=t3_speech_pos_emb,
             s3gen=s3gen, ve=ve, default_conds=default_conds,
             variant=variant,
         )
@@ -249,7 +253,7 @@ class ChatterboxTTS:
         ).to('cpu')
         return new_cond_emb
 
-    def generate(
+    async def generate(
         self,
         prompts: Union[str, list[str]],
         audio_prompt_path: Optional[str] = None,
@@ -261,13 +265,10 @@ class ChatterboxTTS:
         # From original Chatterbox HF generation args
         top_p=0.8,
         repetition_penalty=2.0,
-
-        # Supports anything in https://docs.vllm.ai/en/v0.9.2/api/vllm/index.html?h=samplingparams#vllm.SamplingParams
-        *args, **kwargs,
     ) -> list[any]:
         s3gen_ref, cond_emb = self.get_audio_conditionals(audio_prompt_path)
 
-        return self.generate_with_conds(
+        return await self.generate_with_conds(
             prompts=prompts,
             s3gen_ref=s3gen_ref,
             cond_emb=cond_emb,
@@ -277,10 +278,9 @@ class ChatterboxTTS:
             max_tokens=max_tokens,
             top_p=top_p,
             repetition_penalty=repetition_penalty,
-            *args, **kwargs
         )
 
-    def generate_with_conds(
+    async def generate_with_conds(
         self,
         prompts: Union[str, list[str]],
         s3gen_ref: dict[str, Any],
@@ -299,9 +299,6 @@ class ChatterboxTTS:
         top_p=1.0,
         min_p=0.05,
         repetition_penalty=2.0,
-
-        # Supports anything in https://docs.vllm.ai/en/v0.9.2/api/vllm/index.html?h=samplingparams#vllm.SamplingParams
-        *args, **kwargs,
     ) -> list[any]:
         if isinstance(prompts, str):
             prompts = [prompts]
@@ -321,37 +318,41 @@ class ChatterboxTTS:
 
         # For multilingual, prepend the language token
         if self.variant == "multilingual":
-            # Use angle brackets to avoid conflicts with other start/stop tokens.
-            # This will be parsed and replaced in the tokenizer.
             prompts = [f"<{language_id.lower()}>{p}" for p in prompts]
+
+        sampling_params = SamplingParams(
+            temperature=temperature,
+            stop_token_ids=[self.t3_config.stop_speech_token + SPEECH_TOKEN_OFFSET],
+            max_tokens=min(max_tokens, self.max_model_len),
+            top_p=top_p,
+            min_p=min_p,
+            repetition_penalty=repetition_penalty,
+        )
 
         with torch.inference_mode():
             start_time = time.time()
-            batch_results = self.t3.generate(
-                [
-                    {
-                        "prompt": text,
-                        "multi_modal_data": {
-                            "conditionals": [cond_emb],
-                        },
-                    }
-                    for text in prompts
-                ],
-                sampling_params=SamplingParams(
-                    temperature=temperature,
 
-                    stop_token_ids=[self.t3_config.stop_speech_token + SPEECH_TOKEN_OFFSET],
-                    max_tokens=min(max_tokens, self.max_model_len),
-                    top_p=top_p,
-                    repetition_penalty=repetition_penalty,
+            # Generate all prompts via async engine
+            batch_results = []
+            for text in prompts:
+                prompt = {
+                    "prompt": text,
+                    "multi_modal_data": {
+                        "conditionals": [cond_emb],
+                    },
+                }
+                request_id = str(uuid.uuid4())
+                final_output = None
+                async for output in self.async_engine.generate(
+                    prompt, sampling_params, request_id
+                ):
+                    final_output = output
+                if final_output is not None:
+                    batch_results.append(final_output)
 
-                    *args, **kwargs,
-                )
-            )
             t3_gen_time = time.time() - start_time
             print(f"[T3] Speech Token Generation time: {t3_gen_time:.2f}s")
 
-            # run torch gc
             torch.cuda.empty_cache()
 
             start_time = time.time()
@@ -361,7 +362,6 @@ class ChatterboxTTS:
                     if i % 5 == 0:
                         print(f"[S3] Processing prompt {i} of {len(batch_results)}")
 
-                    # Run gc every 10 prompts
                     if i % 10 == 0:
                         torch.cuda.empty_cache()
 
@@ -440,7 +440,7 @@ class ChatterboxTTS:
         metrics.chunk_count += 1
         return audio_tensor, audio_duration, True
 
-    def generate_stream(
+    async def generate_stream(
         self,
         text: str,
         audio_prompt_path: Optional[str] = None,
@@ -455,10 +455,10 @@ class ChatterboxTTS:
         top_p: float = 1.0,
         min_p: float = 0.05,
         repetition_penalty: float = 2.0,
-    ) -> Generator[Tuple[torch.Tensor, StreamingMetrics], None, None]:
+    ) -> AsyncGenerator[Tuple[torch.Tensor, StreamingMetrics], None]:
         """Stream audio chunks as they are generated.
 
-        Uses vLLM's engine.step() with DELTA output to get tokens incrementally,
+        Uses vLLM's AsyncLLMEngine to get tokens incrementally,
         buffers them into chunks, and runs S3Gen on each chunk with a context
         window for smooth boundaries.
 
@@ -467,7 +467,7 @@ class ChatterboxTTS:
         """
         s3gen_ref, cond_emb = self.get_audio_conditionals(audio_prompt_path)
 
-        yield from self.generate_stream_with_conds(
+        async for chunk in self.generate_stream_with_conds(
             text=text,
             s3gen_ref=s3gen_ref,
             cond_emb=cond_emb,
@@ -482,9 +482,10 @@ class ChatterboxTTS:
             top_p=top_p,
             min_p=min_p,
             repetition_penalty=repetition_penalty,
-        )
+        ):
+            yield chunk
 
-    def generate_stream_with_conds(
+    async def generate_stream_with_conds(
         self,
         text: str,
         s3gen_ref: dict,
@@ -500,12 +501,12 @@ class ChatterboxTTS:
         top_p: float = 1.0,
         min_p: float = 0.05,
         repetition_penalty: float = 2.0,
-    ) -> Generator[Tuple[torch.Tensor, StreamingMetrics], None, None]:
+    ) -> AsyncGenerator[Tuple[torch.Tensor, StreamingMetrics], None]:
         """Stream audio chunks using pre-computed conditioning tensors.
 
-        Core streaming implementation. Drives vLLM's engine step-by-step,
-        accumulates speech tokens into a buffer, and yields audio chunks
-        as each buffer fills up.
+        Core streaming implementation. Uses AsyncLLMEngine.generate() to get
+        tokens incrementally, accumulates speech tokens into a buffer, and
+        yields audio chunks as each buffer fills up.
         """
         if language_id and language_id.lower() not in self.get_supported_languages():
             supported_langs = ", ".join(self.get_supported_languages().keys())
@@ -539,8 +540,6 @@ class ChatterboxTTS:
         sampling_params.output_kind = RequestOutputKind.DELTA
 
         request_id = str(uuid.uuid4())
-        engine = self.t3.llm_engine
-        engine.add_request(request_id, prompt, params=sampling_params)
 
         start_time = time.time()
         metrics = StreamingMetrics()
@@ -550,45 +549,44 @@ class ChatterboxTTS:
         all_tokens_processed = torch.tensor([], dtype=torch.long, device=self.target_device)
 
         with torch.inference_mode():
-            while engine.has_unfinished_requests():
-                step_outputs = engine.step()
+            async for output in self.async_engine.generate(
+                prompt, sampling_params, request_id
+            ):
+                for completion in output.outputs:
+                    token_buffer.extend(completion.token_ids)
 
-                for output in step_outputs:
-                    if output.request_id != request_id:
-                        continue
+                should_process = len(token_buffer) >= chunk_size or output.finished
 
-                    for completion in output.outputs:
-                        token_buffer.extend(completion.token_ids)
+                if should_process and len(token_buffer) > 0:
+                    new_speech_tokens = torch.tensor(
+                        [t - SPEECH_TOKEN_OFFSET for t in token_buffer],
+                        device=self.target_device,
+                    )
+                    new_speech_tokens = drop_invalid_tokens(new_speech_tokens)
+                    new_speech_tokens = new_speech_tokens[new_speech_tokens < 6561]
 
-                    should_process = len(token_buffer) >= chunk_size or output.finished
-
-                    if should_process and len(token_buffer) > 0:
-                        new_speech_tokens = torch.tensor(
-                            [t - SPEECH_TOKEN_OFFSET for t in token_buffer],
-                            device=self.target_device,
+                    if len(new_speech_tokens) > 0:
+                        # Run S3Gen vocoding in a thread to avoid blocking
+                        # the event loop (which the AsyncLLMEngine needs).
+                        audio_tensor, audio_duration, success = await asyncio.to_thread(
+                            self._process_token_buffer,
+                            new_speech_tokens,
+                            all_tokens_processed,
+                            context_window,
+                            s3gen_ref,
+                            start_time,
+                            metrics,
+                            fade_duration,
+                            diffusion_steps,
                         )
-                        new_speech_tokens = drop_invalid_tokens(new_speech_tokens)
-                        new_speech_tokens = new_speech_tokens[new_speech_tokens < 6561]
 
-                        if len(new_speech_tokens) > 0:
-                            audio_tensor, audio_duration, success = self._process_token_buffer(
-                                new_speech_tokens,
-                                all_tokens_processed,
-                                context_window,
-                                s3gen_ref,
-                                start_time,
-                                metrics,
-                                fade_duration,
-                                diffusion_steps,
-                            )
+                        if success:
+                            total_audio_length += audio_duration
+                            yield audio_tensor, metrics
 
-                            if success:
-                                total_audio_length += audio_duration
-                                yield audio_tensor, metrics
+                        all_tokens_processed = torch.cat([all_tokens_processed, new_speech_tokens])
 
-                            all_tokens_processed = torch.cat([all_tokens_processed, new_speech_tokens])
-
-                        token_buffer = []
+                    token_buffer = []
 
             torch.cuda.empty_cache()
 
@@ -602,5 +600,5 @@ class ChatterboxTTS:
             print(f"[Streaming] Chunks yielded: {metrics.chunk_count}")
 
     def shutdown(self):
-        del self.t3
+        del self.async_engine
         torch.cuda.empty_cache()
