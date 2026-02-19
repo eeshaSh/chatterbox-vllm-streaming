@@ -9,8 +9,8 @@ import os
 
 app = FastAPI(title="Chatterbox vLLM Streaming TTS")
 
-print("Loading model on cuda...")
-model = ChatterboxTTS.from_pretrained()
+print("Loading multilingual model on cuda...")
+model = ChatterboxTTS.from_pretrained_multilingual()
 print("Model loaded.")
 
 SAMPLE_RATE = model.sr  # 24000
