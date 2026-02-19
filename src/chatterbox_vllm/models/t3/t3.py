@@ -638,21 +638,27 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
         # print("t3/kwargs", kwargs)
 
         if inputs_embeds is None:
-            # Profiling/dummy run: vLLM calls forward() without multimodal processing,
-            # so inputs_embeds is None. We can't do CFG doubling here because vLLM's
-            # attention metadata is only prepared for N tokens, not 2N.
-            # Run the backbone with dummy embeddings and return a properly shaped output.
-            dummy_embeds = torch.zeros(
-                len(input_ids), self.dim,
-                device=input_ids.device, dtype=next(self.tfmr.parameters()).dtype
-            )
-            hidden_states = self.tfmr(
-                input_ids=None,
-                positions=positions,
-                intermediate_tensors=None,
-                inputs_embeds=dummy_embeds,
-            )
-            return torch.cat([hidden_states, hidden_states], dim=1)
+            # inputs_embeds is None in two cases:
+            # 1. Profiling/dummy run: vLLM passes text-range token IDs (< SPEECH_TOKEN_OFFSET)
+            #    without multimodal processing. We can't do CFG doubling because vLLM's
+            #    attention metadata is only prepared for N tokens, not 2N.
+            # 2. Normal decode: vLLM passes speech token IDs (>= SPEECH_TOKEN_OFFSET) and
+            #    expects the model to handle embedding lookup + CFG doubling.
+            is_dummy_run = input_ids is not None and torch.max(input_ids) < SPEECH_TOKEN_OFFSET
+            if is_dummy_run:
+                dummy_embeds = torch.zeros(
+                    len(input_ids), self.dim,
+                    device=input_ids.device, dtype=next(self.tfmr.parameters()).dtype
+                )
+                hidden_states = self.tfmr(
+                    input_ids=None,
+                    positions=positions,
+                    intermediate_tensors=None,
+                    inputs_embeds=dummy_embeds,
+                )
+                return torch.cat([hidden_states, hidden_states], dim=1)
+            else:
+                inputs_embeds = self.get_input_embeddings(input_ids, [])
 
         # Split the inputs_embeds into the three parts
         cond_embeds, uncond_embeds = inputs_embeds.split([self.dim, self.dim], dim=1)
