@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union, Tuple, Any, AsyncGenerator
-import asyncio
 import time
 import uuid
 
@@ -566,10 +565,7 @@ class ChatterboxTTS:
                     new_speech_tokens = new_speech_tokens[new_speech_tokens < 6561]
 
                     if len(new_speech_tokens) > 0:
-                        # Run S3Gen vocoding in a thread to avoid blocking
-                        # the event loop (which the AsyncLLMEngine needs).
-                        audio_tensor, audio_duration, success = await asyncio.to_thread(
-                            self._process_token_buffer,
+                        audio_tensor, audio_duration, success = self._process_token_buffer(
                             new_speech_tokens,
                             all_tokens_processed,
                             context_window,
