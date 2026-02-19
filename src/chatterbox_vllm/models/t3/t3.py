@@ -642,14 +642,17 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
             has_prefill_tokens = input_ids is not None and torch.any(input_ids < SPEECH_TOKEN_OFFSET)
 
             if has_prefill_tokens:
-                # Try to get multimodal embeddings from kwargs
-                mm_embeds = self.get_multimodal_embeddings(**kwargs)
-                if mm_embeds and len(mm_embeds) > 0:
-                    # Prefill with multimodal data — build proper embeddings
-                    inputs_embeds = self.get_input_embeddings(input_ids, mm_embeds)
-                else:
-                    # Profiling/dummy run — no multimodal data available.
-                    # Run backbone once with dummy embeddings, no CFG.
+                # Try to get multimodal embeddings from kwargs and build proper embeddings.
+                # During profiling/dummy runs, kwargs may contain dummy multimodal data
+                # that doesn't match input_ids dimensions, so we catch errors and fall back.
+                try:
+                    mm_embeds = self.get_multimodal_embeddings(**kwargs)
+                    if mm_embeds and len(mm_embeds) > 0:
+                        inputs_embeds = self.get_input_embeddings(input_ids, mm_embeds)
+                    else:
+                        raise ValueError("No multimodal embeddings")
+                except Exception:
+                    # Profiling/dummy run — run backbone once with dummy embeddings.
                     dummy_embeds = torch.zeros(
                         len(input_ids), self.dim,
                         device=input_ids.device, dtype=next(self.tfmr.parameters()).dtype
