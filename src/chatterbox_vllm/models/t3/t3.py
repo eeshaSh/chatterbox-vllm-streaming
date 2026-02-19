@@ -630,14 +630,26 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
         # print("t3/kwargs", kwargs)
 
         if inputs_embeds is None:
+            # During vLLM profiling/dummy runs, input_ids are small dummy values
+            # (below SPEECH_TOKEN_OFFSET). Skip CFG batch doubling to avoid
+            # attention backend assertions on token counts.
+            is_profiling = input_ids is not None and torch.any(input_ids < SPEECH_TOKEN_OFFSET)
+
+            if is_profiling:
+                safe_ids = torch.clamp(input_ids - SPEECH_TOKEN_OFFSET, 0, self.speech_emb.num_embeddings - 1)
+                embeds = self.speech_emb(safe_ids)
+                hidden_states = self.tfmr(
+                    input_ids=None,
+                    positions=positions,
+                    intermediate_tensors=None,
+                    inputs_embeds=embeds,
+                )
+                return torch.cat([hidden_states, hidden_states], dim=1)
+
             inputs_embeds = self.get_input_embeddings(input_ids, [])
 
-        # Split the inputs_embeds into the three parts
+        # Split the inputs_embeds into the cond and uncond parts for CFG
         cond_embeds, uncond_embeds = inputs_embeds.split([self.dim, self.dim], dim=1)
-        # print("t3/cond_embeds", cond_embeds.shape, cond_embeds.dtype)
-        # print("t3/uncond_embeds", uncond_embeds.shape, uncond_embeds.dtype)
-
-        # TODO: Apply speech positional embeddings here
 
         hidden_states = self.tfmr(
             input_ids=None,
@@ -645,7 +657,6 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
             intermediate_tensors=None,
             inputs_embeds=torch.cat([cond_embeds, uncond_embeds], dim=0)
         )
-        # print("t3/hidden_states", hidden_states.shape, hidden_states.dtype)
 
         # Reconcatenate the hidden states into the master tensor
         hidden_state_1, hidden_state_2 = hidden_states.split([len(cond_embeds), len(uncond_embeds)], dim=0)
