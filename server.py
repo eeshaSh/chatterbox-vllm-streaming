@@ -3,7 +3,7 @@ import struct
 import torch
 import numpy as np
 from fastapi import FastAPI, Query, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from chatterbox_vllm.tts import ChatterboxTTS
 from typing import Optional
 import tempfile
@@ -146,6 +146,76 @@ async def tts_post(
         stream_and_cleanup(),
         media_type=content_type,
     )
+
+
+def make_wav_bytes(audio_np: np.ndarray, sample_rate: int, num_channels: int = 1, bits_per_sample: int = 16) -> bytes:
+    """Create a complete WAV file in memory from a numpy array."""
+    pcm_data = (audio_np * 32767).astype(np.int16).tobytes()
+    data_size = len(pcm_data)
+    byte_rate = sample_rate * num_channels * bits_per_sample // 8
+    block_align = num_channels * bits_per_sample // 8
+
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + data_size,
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,  # PCM
+        num_channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+        b"data",
+        data_size,
+    )
+    return header + pcm_data
+
+
+@app.post("/tts_batched")
+async def tts_batched(
+    text: str = Form(..., description="Text to synthesize"),
+    audio_prompt: Optional[UploadFile] = File(None, description="Reference audio for voice cloning"),
+    language_id: str = Form("en"),
+    exaggeration: float = Form(0.5),
+    temperature: float = Form(0.8),
+    diffusion_steps: int = Form(10),
+    format: str = Form("wav"),
+):
+    """Non-streaming batched TTS using vLLM's LLM.generate(). Returns complete audio."""
+    audio_prompt_path = None
+    tmp_file = None
+
+    try:
+        if audio_prompt is not None:
+            tmp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            tmp_file.write(await audio_prompt.read())
+            tmp_file.close()
+            audio_prompt_path = tmp_file.name
+
+        results = model.generate(
+            prompts=text,
+            audio_prompt_path=audio_prompt_path,
+            language_id=language_id,
+            exaggeration=exaggeration,
+            temperature=temperature,
+            diffusion_steps=diffusion_steps,
+        )
+
+        wav = results[0]  # First result
+        audio_np = wav.squeeze().cpu().numpy()
+
+        if format == "wav":
+            wav_bytes = make_wav_bytes(audio_np, SAMPLE_RATE)
+            return Response(content=wav_bytes, media_type="audio/wav")
+        else:
+            pcm_data = (audio_np * 32767).astype(np.int16).tobytes()
+            return Response(content=pcm_data, media_type="audio/L16;rate=24000;channels=1")
+    finally:
+        if tmp_file is not None:
+            os.unlink(tmp_file.name)
 
 
 if __name__ == "__main__":

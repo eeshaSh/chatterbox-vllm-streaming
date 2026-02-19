@@ -666,17 +666,24 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
         # concatenating along dim=0. Doubling tokens along dim=0 breaks
         # vLLM attention backends (flash_attn, flashinfer) which assert
         # that the actual token count matches the scheduler's metadata.
-        cond_hidden = self.tfmr(
-            input_ids=None,
-            positions=positions,
-            intermediate_tensors=None,
-            inputs_embeds=cond_embeds,
-        )
+        #
+        # IMPORTANT: Run uncond FIRST, then cond. Both calls write to the
+        # same KV cache slots (same positions, same request). The second
+        # call's K/V values overwrite the first's. By running cond last,
+        # the KV cache retains cond (text-conditioned) values, so decode
+        # steps produce text-following audio rather than unconditional
+        # gibberish.
         uncond_hidden = self.tfmr(
             input_ids=None,
             positions=positions,
             intermediate_tensors=None,
             inputs_embeds=uncond_embeds,
+        )
+        cond_hidden = self.tfmr(
+            input_ids=None,
+            positions=positions,
+            intermediate_tensors=None,
+            inputs_embeds=cond_embeds,
         )
 
         return torch.cat([cond_hidden, uncond_hidden], dim=1)
