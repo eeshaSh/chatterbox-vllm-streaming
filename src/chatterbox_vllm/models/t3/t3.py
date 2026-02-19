@@ -439,7 +439,11 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
             #     print("SPEECH_TOKEN_OFFSET", SPEECH_TOKEN_OFFSET)
             #     raise ValueError("input_ids is less than SPEECH_TOKEN_OFFSET")
 
-            embeds = self.speech_emb(input_ids - SPEECH_TOKEN_OFFSET)
+            # Clamp to valid range — during vLLM's profiling dummy run,
+            # input_ids may contain text-range tokens (< SPEECH_TOKEN_OFFSET)
+            # which would produce negative indices and crash the embedding lookup.
+            speech_ids = (input_ids - SPEECH_TOKEN_OFFSET).clamp(0, self.speech_emb.num_embeddings - 1)
+            embeds = self.speech_emb(speech_ids)
 
             out = torch.cat([embeds, embeds], dim=1)
 
@@ -461,7 +465,8 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
                 if multimodal_embedding is None:
                     # There's no multimodal embeddings, so we're decoding.
                     # Remember to undo the offset we applied to the speech tokens.
-                    embeds = self.speech_emb(ids - SPEECH_TOKEN_OFFSET)
+                    speech_ids = (ids - SPEECH_TOKEN_OFFSET).clamp(0, self.speech_emb.num_embeddings - 1)
+                    embeds = self.speech_emb(speech_ids)
                     final_embeds = torch.cat([embeds, embeds], dim=1)
                     # assert len(final_embeds) == len(ids), "Number of output elements does not match number of input elements"
                     
