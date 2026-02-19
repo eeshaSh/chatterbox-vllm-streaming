@@ -429,6 +429,7 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
+        print(f"[T3 get_input_embeddings] called! input_ids.shape={input_ids.shape}, multimodal_embeddings={'None' if multimodal_embeddings is None else f'len={len(multimodal_embeddings)}'}")
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             # There's no multimodal embeddings, so we're decoding.
             # Remember to undo the offset we applied to the speech tokens.
@@ -635,7 +636,7 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
         # These are usually NULL:
         # print("t3/intermediate_tensors", intermediate_tensors)
         # print("t3/input_ids", input_ids)
-        # print("t3/kwargs", kwargs)
+        print(f"[T3 forward] kwargs keys: {list(kwargs.keys())}")
 
         if inputs_embeds is None:
             # inputs_embeds is None in two cases:
