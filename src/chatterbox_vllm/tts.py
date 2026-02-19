@@ -1,12 +1,16 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union, Tuple, Any
+from typing import Optional, Union, Tuple, Any, Generator
 import time
+import uuid
 
 from vllm import LLM, SamplingParams
+from vllm.sampling_params import RequestOutputKind
 from functools import lru_cache
 
 import librosa
+import numpy as np
+import perth
 import torch
 import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
@@ -57,6 +61,16 @@ class Conditionals:
         return cls(T3Cond(**kwargs['t3']), kwargs['gen'])
 
 
+@dataclass
+class StreamingMetrics:
+    """Metrics for streaming TTS generation"""
+    latency_to_first_chunk: Optional[float] = None
+    rtf: Optional[float] = None
+    total_generation_time: Optional[float] = None
+    total_audio_duration: Optional[float] = None
+    chunk_count: int = 0
+
+
 class ChatterboxTTS:
     ENC_COND_LEN = 6 * S3_SR
     DEC_COND_LEN = 10 * S3GEN_SR
@@ -78,6 +92,7 @@ class ChatterboxTTS:
         self.ve = ve
         self.default_conds = default_conds
         self.variant = variant
+        self.watermarker = perth.PerthImplicitWatermarker()
 
     @property
     def sr(self) -> int:
@@ -367,6 +382,280 @@ class ChatterboxTTS:
 
             return results
         
+    def _process_token_buffer(
+        self,
+        new_tokens: torch.Tensor,
+        all_tokens_so_far: torch.Tensor,
+        context_window: int,
+        s3gen_ref: dict,
+        start_time: float,
+        metrics: StreamingMetrics,
+        fade_duration: float = 0.02,
+        diffusion_steps: int = 10,
+    ):
+        """Process a chunk of speech tokens into audio, using context windowing for smooth boundaries."""
+        # Build tokens_to_process by including a context window from previous tokens
+        if len(all_tokens_so_far) > 0:
+            context_tokens = (
+                all_tokens_so_far[-context_window:]
+                if len(all_tokens_so_far) > context_window
+                else all_tokens_so_far
+            )
+            tokens_to_process = torch.cat([context_tokens, new_tokens], dim=-1)
+            context_length = len(context_tokens)
+        else:
+            tokens_to_process = new_tokens
+            context_length = 0
+
+        # Drop any invalid tokens
+        clean_tokens = drop_invalid_tokens(tokens_to_process).to(self.target_device)
+        if len(clean_tokens) == 0:
+            return None, 0.0, False
+
+        # Run S3Gen inference to get a waveform
+        wav, _ = self.s3gen.inference(
+            speech_tokens=clean_tokens,
+            ref_dict=s3gen_ref,
+            n_timesteps=diffusion_steps,
+        )
+        wav = wav.squeeze(0).detach().cpu().numpy()
+
+        # If we have context tokens, crop out the samples corresponding to them
+        if context_length > 0:
+            samples_per_token = len(wav) / len(clean_tokens)
+            skip_samples = int(context_length * samples_per_token)
+            audio_chunk = wav[skip_samples:]
+        else:
+            audio_chunk = wav
+
+        if len(audio_chunk) == 0:
+            return None, 0.0, False
+
+        # Apply a short linear fade-in on the new chunk to smooth boundaries
+        fade_samples = int(fade_duration * self.sr)
+        if fade_samples > 0:
+            if fade_samples > len(audio_chunk):
+                fade_samples = len(audio_chunk)
+            fade_in = np.linspace(0.0, 1.0, fade_samples, dtype=audio_chunk.dtype)
+            audio_chunk[:fade_samples] *= fade_in
+
+        # Compute audio duration and apply watermark
+        audio_duration = len(audio_chunk) / self.sr
+        watermarked_chunk = self.watermarker.apply_watermark(audio_chunk, sample_rate=self.sr)
+        audio_tensor = torch.from_numpy(watermarked_chunk).unsqueeze(0)
+
+        # Update first-chunk latency metric
+        if metrics.chunk_count == 0:
+            metrics.latency_to_first_chunk = time.time() - start_time
+            print(f"Latency to first chunk: {metrics.latency_to_first_chunk:.3f}s")
+
+        metrics.chunk_count += 1
+        return audio_tensor, audio_duration, True
+
+    def generate_stream(
+        self,
+        text: str,
+        audio_prompt_path: Optional[str] = None,
+        language_id: Optional[str] = 'en',
+        exaggeration: float = 0.5,
+        temperature: float = 0.8,
+        chunk_size: int = 25,
+        context_window: int = 50,
+        fade_duration: float = 0.02,
+        diffusion_steps: int = 10,
+        max_tokens: int = 1000,
+        top_p: float = 1.0,
+        min_p: float = 0.05,
+        repetition_penalty: float = 2.0,
+    ) -> Generator[Tuple[torch.Tensor, StreamingMetrics], None, None]:
+        """
+        Streaming version of generate that yields audio chunks as they are generated.
+
+        Args:
+            text: Input text to synthesize
+            audio_prompt_path: Optional path to reference audio for voice cloning
+            language_id: Language code for multilingual models
+            exaggeration: Emotion exaggeration factor
+            temperature: Sampling temperature
+            chunk_size: Number of speech tokens per chunk
+            context_window: Number of previous tokens to include as context for each chunk
+            fade_duration: Seconds of linear fade-in applied to each chunk for smooth boundaries
+            diffusion_steps: Number of diffusion steps for S3Gen
+            max_tokens: Maximum number of speech tokens to generate
+            top_p: Top-p (nucleus) sampling parameter
+            min_p: Min-p sampling parameter
+            repetition_penalty: Repetition penalty for token generation
+
+        Yields:
+            Tuple of (audio_chunk, metrics) where audio_chunk is a torch.Tensor
+            and metrics contains timing information
+        """
+        s3gen_ref, cond_emb = self.get_audio_conditionals(audio_prompt_path)
+
+        yield from self.generate_stream_with_conds(
+            text=text,
+            s3gen_ref=s3gen_ref,
+            cond_emb=cond_emb,
+            language_id=language_id,
+            exaggeration=exaggeration,
+            temperature=temperature,
+            chunk_size=chunk_size,
+            context_window=context_window,
+            fade_duration=fade_duration,
+            diffusion_steps=diffusion_steps,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            min_p=min_p,
+            repetition_penalty=repetition_penalty,
+        )
+
+    def generate_stream_with_conds(
+        self,
+        text: str,
+        s3gen_ref: dict,
+        cond_emb: torch.Tensor,
+        language_id: Optional[str] = 'en',
+        exaggeration: float = 0.5,
+        temperature: float = 0.8,
+        chunk_size: int = 25,
+        context_window: int = 50,
+        fade_duration: float = 0.02,
+        diffusion_steps: int = 10,
+        max_tokens: int = 1000,
+        top_p: float = 1.0,
+        min_p: float = 0.05,
+        repetition_penalty: float = 2.0,
+    ) -> Generator[Tuple[torch.Tensor, StreamingMetrics], None, None]:
+        """
+        Streaming version of generate_with_conds that yields audio chunks as they are generated.
+        Accepts pre-computed conditioning tensors.
+
+        Args:
+            text: Input text to synthesize (single string)
+            s3gen_ref: Pre-computed S3Gen reference dictionary
+            cond_emb: Pre-computed conditioning embedding tensor
+            language_id: Language code for multilingual models
+            exaggeration: Emotion exaggeration factor
+            temperature: Sampling temperature
+            chunk_size: Number of speech tokens per chunk
+            context_window: Number of previous tokens to include as context for each chunk
+            fade_duration: Seconds of linear fade-in applied to each chunk for smooth boundaries
+            diffusion_steps: Number of diffusion steps for S3Gen
+            max_tokens: Maximum number of speech tokens to generate
+            top_p: Top-p (nucleus) sampling parameter
+            min_p: Min-p sampling parameter
+            repetition_penalty: Repetition penalty for token generation
+
+        Yields:
+            Tuple of (audio_chunk, metrics) where audio_chunk is a torch.Tensor
+            and metrics contains timing information
+        """
+        # Validate language_id
+        if language_id and language_id.lower() not in self.get_supported_languages():
+            supported_langs = ", ".join(self.get_supported_languages().keys())
+            raise ValueError(
+                f"Unsupported language_id '{language_id}'. "
+                f"Supported languages: {supported_langs}"
+            )
+
+        cond_emb = self.update_exaggeration(cond_emb, exaggeration)
+
+        # Norm and tokenize text
+        text = "[START]" + punc_norm(text) + "[STOP]"
+
+        # For multilingual, prepend the language token
+        if self.variant == "multilingual":
+            text = f"<{language_id.lower()}>{text}"
+
+        # Build the vLLM prompt dict
+        prompt = {
+            "prompt": text,
+            "multi_modal_data": {
+                "conditionals": [cond_emb],
+            },
+        }
+
+        # Create sampling params with DELTA output for streaming
+        stop_token_id = self.t3_config.stop_speech_token + SPEECH_TOKEN_OFFSET
+        sampling_params = SamplingParams(
+            temperature=temperature,
+            stop_token_ids=[stop_token_id],
+            max_tokens=min(max_tokens, self.max_model_len),
+            top_p=top_p,
+            min_p=min_p,
+            repetition_penalty=repetition_penalty,
+        )
+        sampling_params.output_kind = RequestOutputKind.DELTA
+
+        # Add request to the engine
+        request_id = str(uuid.uuid4())
+        engine = self.t3.llm_engine
+        engine.add_request(request_id, prompt, params=sampling_params)
+
+        start_time = time.time()
+        metrics = StreamingMetrics()
+        total_audio_length = 0.0
+
+        token_buffer = []  # Accumulated delta token IDs (raw, with offset)
+        all_tokens_processed = torch.tensor([], dtype=torch.long, device=self.target_device)
+
+        with torch.inference_mode():
+            while engine.has_unfinished_requests():
+                step_outputs = engine.step()
+
+                for output in step_outputs:
+                    if output.request_id != request_id:
+                        continue
+
+                    for completion in output.outputs:
+                        token_buffer.extend(completion.token_ids)
+
+                    # Process chunk when buffer reaches chunk_size or request is finished
+                    should_process = len(token_buffer) >= chunk_size or output.finished
+
+                    if should_process and len(token_buffer) > 0:
+                        # Convert to speech tokens (subtract offset, filter invalid)
+                        new_speech_tokens = torch.tensor(
+                            [t - SPEECH_TOKEN_OFFSET for t in token_buffer],
+                            device=self.target_device,
+                        )
+                        new_speech_tokens = drop_invalid_tokens(new_speech_tokens)
+                        new_speech_tokens = new_speech_tokens[new_speech_tokens < 6561]
+
+                        if len(new_speech_tokens) > 0:
+                            audio_tensor, audio_duration, success = self._process_token_buffer(
+                                new_speech_tokens,
+                                all_tokens_processed,
+                                context_window,
+                                s3gen_ref,
+                                start_time,
+                                metrics,
+                                fade_duration,
+                                diffusion_steps,
+                            )
+
+                            if success:
+                                total_audio_length += audio_duration
+                                yield audio_tensor, metrics
+
+                            # Update processed tokens
+                            all_tokens_processed = torch.cat([all_tokens_processed, new_speech_tokens])
+
+                        token_buffer = []
+
+            # Clear CUDA cache after streaming completes
+            torch.cuda.empty_cache()
+
+        # Final metrics
+        metrics.total_generation_time = time.time() - start_time
+        metrics.total_audio_duration = total_audio_length
+        if total_audio_length > 0:
+            metrics.rtf = metrics.total_generation_time / total_audio_length
+            print(f"[Streaming] Total generation time: {metrics.total_generation_time:.3f}s")
+            print(f"[Streaming] Total audio duration: {metrics.total_audio_duration:.3f}s")
+            print(f"[Streaming] RTF (Real-Time Factor): {metrics.rtf:.3f}")
+            print(f"[Streaming] Total chunks yielded: {metrics.chunk_count}")
+
     def shutdown(self):
         del self.t3
         torch.cuda.empty_cache()
