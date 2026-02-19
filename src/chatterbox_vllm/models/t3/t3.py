@@ -691,9 +691,9 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
         # Cast to transformer dtype (embedding layers are float32, transformer is bfloat16).
         tfmr_dtype = next(self.tfmr.parameters()).dtype
         inputs_embeds = inputs_embeds.to(dtype=tfmr_dtype)
-        cond_embeds, uncond_embeds = inputs_embeds.split([self.dim, self.dim], dim=1)
-        cond_embeds = cond_embeds.contiguous()
-        uncond_embeds = uncond_embeds.contiguous()
+        # Extract only cond embeddings (first dim channels). Uncond is discarded since
+        # we can only run the transformer once per forward() call in vLLM.
+        cond_embeds = inputs_embeds[:, :self.dim].contiguous()
 
         # Track the start-of-speech position for speech positional embeddings during decode.
         if input_ids is not None:
@@ -702,16 +702,12 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
                 idx = end_mask.nonzero(as_tuple=True)[0][-1]
                 self._speech_start_position = positions[idx].item()
 
-        # Run uncond FIRST, then cond. Both calls write to the same KV cache slots
-        # (same positions). The second call's K/V values overwrite the first's.
-        # By running cond last, the KV cache retains text-conditioned values,
-        # so decode steps attend to text-following context rather than unconditional.
-        uncond_hidden = self.tfmr(
-            input_ids=None,
-            positions=positions,
-            intermediate_tensors=None,
-            inputs_embeds=uncond_embeds,
-        )
+        # Run transformer ONCE with cond embeddings and duplicate the output.
+        # We cannot call self.tfmr() twice in a single forward() because vLLM's
+        # attention metadata (forward context) is consumed by the first call,
+        # causing assertion failures when concurrent requests are batched together.
+        # This effectively disables CFG during prefill (uncond == cond), which is
+        # acceptable since CFG is already disabled during decode in the vLLM path.
         cond_hidden = self.tfmr(
             input_ids=None,
             positions=positions,
@@ -719,7 +715,7 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
             inputs_embeds=cond_embeds,
         )
 
-        return torch.cat([cond_hidden, uncond_hidden], dim=1)
+        return torch.cat([cond_hidden, cond_hidden], dim=1)
 
     def get_language_model(self) -> torch.nn.Module:
         return self.tfmr
