@@ -692,6 +692,8 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
         tfmr_dtype = next(self.tfmr.parameters()).dtype
         inputs_embeds = inputs_embeds.to(dtype=tfmr_dtype)
         cond_embeds, uncond_embeds = inputs_embeds.split([self.dim, self.dim], dim=1)
+        cond_embeds = cond_embeds.contiguous()
+        uncond_embeds = uncond_embeds.contiguous()
 
         # Track the start-of-speech position for speech positional embeddings during decode.
         if input_ids is not None:
