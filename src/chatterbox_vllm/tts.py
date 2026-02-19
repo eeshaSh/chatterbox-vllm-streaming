@@ -559,6 +559,8 @@ class ChatterboxTTS:
 
                     for completion in output.outputs:
                         token_buffer.extend(completion.token_ids)
+                        if len(completion.token_ids) > 0:
+                            print(f"[Streaming] Step token(s): {completion.token_ids}, buffer_size={len(token_buffer)}, finished={output.finished}, finish_reason={completion.finish_reason}")
 
                     should_process = len(token_buffer) >= chunk_size or output.finished
 

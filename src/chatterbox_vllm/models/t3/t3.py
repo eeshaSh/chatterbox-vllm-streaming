@@ -642,6 +642,7 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
             # 1. Profiling/dummy run: vLLM passes text-range token IDs (< SPEECH_TOKEN_OFFSET)
             # 2. Normal decode: vLLM passes speech token IDs (>= SPEECH_TOKEN_OFFSET)
             is_profiling = input_ids is not None and torch.any(input_ids < SPEECH_TOKEN_OFFSET)
+            print(f"[T3 forward] inputs_embeds=None, input_ids={input_ids}, positions={positions}, is_profiling={is_profiling}, _speech_start_position={self._speech_start_position}")
             if is_profiling:
                 # Profiling run — run backbone once with dummy embeddings, no CFG doubling.
                 dummy_embeds = torch.zeros(
@@ -683,11 +684,18 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
         cond_embeds, uncond_embeds = inputs_embeds.split([self.dim, self.dim], dim=1)
 
         # Track the start-of-speech position for speech positional embeddings during decode.
+        print(f"[T3 forward] PREFILL path: input_ids is None={input_ids is None}, inputs_embeds.shape={inputs_embeds.shape}")
         if input_ids is not None:
+            print(f"[T3 forward] PREFILL input_ids: {input_ids[:10]}...{input_ids[-5:]}, len={len(input_ids)}")
             end_mask = (input_ids == PREFILL_END_TOKEN)
             if end_mask.any():
                 idx = end_mask.nonzero(as_tuple=True)[0][-1]
                 self._speech_start_position = positions[idx].item()
+                print(f"[T3 forward] Set _speech_start_position={self._speech_start_position}")
+            else:
+                print(f"[T3 forward] WARNING: PREFILL_END_TOKEN ({PREFILL_END_TOKEN}) not found in input_ids!")
+        else:
+            print(f"[T3 forward] WARNING: input_ids is None during prefill! Cannot set _speech_start_position.")
 
         # Run uncond FIRST, then cond. Both calls write to the same KV cache slots
         # (same positions). The second call's K/V values overwrite the first's.
