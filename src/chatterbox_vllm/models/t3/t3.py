@@ -429,7 +429,6 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
-        print(f"[T3 get_input_embeddings] called! input_ids.shape={input_ids.shape}, multimodal_embeddings={'None' if multimodal_embeddings is None else f'len={len(multimodal_embeddings)}'}")
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             # There's no multimodal embeddings, so we're decoding.
             # Remember to undo the offset we applied to the speech tokens.
@@ -636,67 +635,64 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
         # These are usually NULL:
         # print("t3/intermediate_tensors", intermediate_tensors)
         # print("t3/input_ids", input_ids)
-        print(f"[T3 forward] kwargs keys: {list(kwargs.keys())}")
-
         if inputs_embeds is None:
-            # inputs_embeds is None in two cases:
-            # 1. Profiling/dummy run: vLLM passes text-range token IDs (< SPEECH_TOKEN_OFFSET)
-            # 2. Normal decode: vLLM passes speech token IDs (>= SPEECH_TOKEN_OFFSET)
-            is_profiling = input_ids is not None and torch.any(input_ids < SPEECH_TOKEN_OFFSET)
-            print(f"[T3 forward] inputs_embeds=None, input_ids={input_ids}, positions={positions}, is_profiling={is_profiling}, _speech_start_position={self._speech_start_position}")
-            if is_profiling:
-                # Profiling run — run backbone once with dummy embeddings, no CFG doubling.
-                dummy_embeds = torch.zeros(
-                    len(input_ids), self.dim,
-                    device=input_ids.device, dtype=next(self.tfmr.parameters()).dtype
+            # Check if this is a prefill with multimodal data in kwargs.
+            # vLLM may not always call get_input_embeddings before forward(),
+            # so we need to handle this case ourselves.
+            has_prefill_tokens = input_ids is not None and torch.any(input_ids < SPEECH_TOKEN_OFFSET)
+
+            if has_prefill_tokens:
+                # Try to get multimodal embeddings from kwargs
+                mm_embeds = self.get_multimodal_embeddings(**kwargs)
+                if mm_embeds and len(mm_embeds) > 0:
+                    # Prefill with multimodal data — build proper embeddings
+                    inputs_embeds = self.get_input_embeddings(input_ids, mm_embeds)
+                else:
+                    # Profiling/dummy run — no multimodal data available.
+                    # Run backbone once with dummy embeddings, no CFG.
+                    dummy_embeds = torch.zeros(
+                        len(input_ids), self.dim,
+                        device=input_ids.device, dtype=next(self.tfmr.parameters()).dtype
+                    )
+                    hidden_states = self.tfmr(
+                        input_ids=None,
+                        positions=positions,
+                        intermediate_tensors=None,
+                        inputs_embeds=dummy_embeds,
+                    )
+                    return torch.cat([hidden_states, hidden_states], dim=1)
+            else:
+                # Decode path: cond and uncond embeddings are identical (same speech token).
+                # Run transformer once and duplicate the output to avoid doubling positions
+                # along dim=0, which causes attention backend assertion failures.
+                embeds = self.speech_emb(
+                    torch.clamp(input_ids - SPEECH_TOKEN_OFFSET, 0, self.speech_emb.num_embeddings - 1)
                 )
+
+                # Apply speech positional embeddings during decode
+                if self._speech_start_position is not None:
+                    speech_positions = (positions - self._speech_start_position).clamp(
+                        0, self.precomputed_speech_pos_emb.shape[0] - 1
+                    )
+                    embeds = embeds + self.precomputed_speech_pos_emb[speech_positions]
+
                 hidden_states = self.tfmr(
                     input_ids=None,
                     positions=positions,
                     intermediate_tensors=None,
-                    inputs_embeds=dummy_embeds,
+                    inputs_embeds=embeds,
                 )
                 return torch.cat([hidden_states, hidden_states], dim=1)
 
-            # Decode path: cond and uncond embeddings are identical (same speech token).
-            # Run transformer once and duplicate the output to avoid doubling positions
-            # along dim=0, which causes attention backend assertion failures.
-            embeds = self.speech_emb(
-                torch.clamp(input_ids - SPEECH_TOKEN_OFFSET, 0, self.speech_emb.num_embeddings - 1)
-            )
-
-            # Apply speech positional embeddings during decode
-            if self._speech_start_position is not None:
-                speech_positions = (positions - self._speech_start_position).clamp(
-                    0, self.precomputed_speech_pos_emb.shape[0] - 1
-                )
-                embeds = embeds + self.precomputed_speech_pos_emb[speech_positions]
-
-            hidden_states = self.tfmr(
-                input_ids=None,
-                positions=positions,
-                intermediate_tensors=None,
-                inputs_embeds=embeds,
-            )
-            return torch.cat([hidden_states, hidden_states], dim=1)
-
-        # Prefill path (inputs_embeds provided by multimodal pipeline).
-        # cond and uncond embeddings differ (text vs zeros for CFG).
+        # Prefill path — inputs_embeds has shape [seq_len, 2*dim] with cond||uncond.
         cond_embeds, uncond_embeds = inputs_embeds.split([self.dim, self.dim], dim=1)
 
         # Track the start-of-speech position for speech positional embeddings during decode.
-        print(f"[T3 forward] PREFILL path: input_ids is None={input_ids is None}, inputs_embeds.shape={inputs_embeds.shape}")
         if input_ids is not None:
-            print(f"[T3 forward] PREFILL input_ids: {input_ids[:10]}...{input_ids[-5:]}, len={len(input_ids)}")
             end_mask = (input_ids == PREFILL_END_TOKEN)
             if end_mask.any():
                 idx = end_mask.nonzero(as_tuple=True)[0][-1]
                 self._speech_start_position = positions[idx].item()
-                print(f"[T3 forward] Set _speech_start_position={self._speech_start_position}")
-            else:
-                print(f"[T3 forward] WARNING: PREFILL_END_TOKEN ({PREFILL_END_TOKEN}) not found in input_ids!")
-        else:
-            print(f"[T3 forward] WARNING: input_ids is None during prefill! Cannot set _speech_start_position.")
 
         # Run uncond FIRST, then cond. Both calls write to the same KV cache slots
         # (same positions). The second call's K/V values overwrite the first's.
