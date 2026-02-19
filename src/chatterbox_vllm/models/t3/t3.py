@@ -646,21 +646,40 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
                 )
                 return torch.cat([hidden_states, hidden_states], dim=1)
 
-            inputs_embeds = self.get_input_embeddings(input_ids, [])
+            # Decode path: cond and uncond embeddings are identical (same
+            # speech token). Run transformer once and duplicate the output
+            # to avoid doubling positions along dim=0, which causes flash
+            # attention assertion failures on decode query token counts.
+            embeds = self.speech_emb(torch.clamp(input_ids - SPEECH_TOKEN_OFFSET, 0, self.speech_emb.num_embeddings - 1))
+            hidden_states = self.tfmr(
+                input_ids=None,
+                positions=positions,
+                intermediate_tensors=None,
+                inputs_embeds=embeds,
+            )
+            return torch.cat([hidden_states, hidden_states], dim=1)
 
         # Split the inputs_embeds into the cond and uncond parts for CFG
         cond_embeds, uncond_embeds = inputs_embeds.split([self.dim, self.dim], dim=1)
 
-        hidden_states = self.tfmr(
+        # Run transformer separately for cond and uncond paths instead of
+        # concatenating along dim=0. Doubling tokens along dim=0 breaks
+        # vLLM attention backends (flash_attn, flashinfer) which assert
+        # that the actual token count matches the scheduler's metadata.
+        cond_hidden = self.tfmr(
             input_ids=None,
-            positions=torch.cat([positions, positions], dim=0),
+            positions=positions,
             intermediate_tensors=None,
-            inputs_embeds=torch.cat([cond_embeds, uncond_embeds], dim=0)
+            inputs_embeds=cond_embeds,
+        )
+        uncond_hidden = self.tfmr(
+            input_ids=None,
+            positions=positions,
+            intermediate_tensors=None,
+            inputs_embeds=uncond_embeds,
         )
 
-        # Reconcatenate the hidden states into the master tensor
-        hidden_state_1, hidden_state_2 = hidden_states.split([len(cond_embeds), len(uncond_embeds)], dim=0)
-        return torch.cat([hidden_state_1, hidden_state_2], dim=1)
+        return torch.cat([cond_hidden, uncond_hidden], dim=1)
 
     def get_language_model(self) -> torch.nn.Module:
         return self.tfmr
