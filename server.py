@@ -98,6 +98,12 @@ async def tts_get(
             output_format=format,
         ),
         media_type=content_type,
+        headers={
+            "Cache-Control": "no-cache",
+            "Transfer-Encoding": "chunked",
+            "X-Accel-Buffering": "no",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
@@ -142,6 +148,12 @@ async def tts_post(
     return StreamingResponse(
         stream_and_cleanup(),
         media_type=content_type,
+        headers={
+            "Cache-Control": "no-cache",
+            "Transfer-Encoding": "chunked",
+            "X-Accel-Buffering": "no",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
