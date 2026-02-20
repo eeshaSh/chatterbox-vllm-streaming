@@ -101,28 +101,31 @@ class ConditionalCFM(BASECFM):
         # Or in future might add like a return_all_steps flag
         sol = []
 
-        # Do not use concat, it may cause memory format changed and trt infer with wrong results!
-        x_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
-        mask_in = torch.zeros([2, 1, x.size(2)], device=x.device, dtype=x.dtype)
-        mu_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
-        t_in = torch.zeros([2], device=x.device, dtype=x.dtype)
-        spks_in = torch.zeros([2, 80], device=x.device, dtype=x.dtype)
-        cond_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
+        B = x.size(0)
+        # CFG doubles the batch: slots [:B] = conditioned, slots [B:] = unconditioned (zeroed)
+        x_in = torch.zeros([2 * B, 80, x.size(2)], device=x.device, dtype=x.dtype)
+        mask_in = torch.zeros([2 * B, 1, x.size(2)], device=x.device, dtype=x.dtype)
+        mu_in = torch.zeros([2 * B, 80, x.size(2)], device=x.device, dtype=x.dtype)
+        t_in = torch.zeros([2 * B], device=x.device, dtype=x.dtype)
+        spks_in = torch.zeros([2 * B, 80], device=x.device, dtype=x.dtype)
+        cond_in = torch.zeros([2 * B, 80, x.size(2)], device=x.device, dtype=x.dtype)
         for step in range(1, len(t_span)):
-            # Classifier-Free Guidance inference introduced in VoiceBox
-            x_in[:] = x
-            mask_in[:] = mask
-            mu_in[0] = mu
-            t_in[:] = t.unsqueeze(0)
-            spks_in[0] = spks
-            cond_in[0] = cond
+            # Classifier-Free Guidance: conditioned slots get real data,
+            # unconditioned slots stay zeroed (except x and t)
+            x_in[:B] = x
+            x_in[B:] = x
+            mask_in[:B] = mask
+            mu_in[:B] = mu
+            t_in[:] = t
+            spks_in[:B] = spks
+            cond_in[:B] = cond
             dphi_dt = self.forward_estimator(
                 x_in, mask_in,
                 mu_in, t_in,
                 spks_in,
                 cond_in
             )
-            dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [x.size(0), x.size(0)], dim=0)
+            dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [B, B], dim=0)
             dphi_dt = ((1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt)
             x = x + dt * dphi_dt
             t = t + dt
@@ -136,13 +139,14 @@ class ConditionalCFM(BASECFM):
         if isinstance(self.estimator, torch.nn.Module):
             return self.estimator.forward(x, mask, mu, t, spks, cond)
         else:
+            B2 = x.size(0)  # 2*B for CFG
             with self.lock:
-                self.estimator.set_input_shape('x', (2, 80, x.size(2)))
-                self.estimator.set_input_shape('mask', (2, 1, x.size(2)))
-                self.estimator.set_input_shape('mu', (2, 80, x.size(2)))
-                self.estimator.set_input_shape('t', (2,))
-                self.estimator.set_input_shape('spks', (2, 80))
-                self.estimator.set_input_shape('cond', (2, 80, x.size(2)))
+                self.estimator.set_input_shape('x', (B2, 80, x.size(2)))
+                self.estimator.set_input_shape('mask', (B2, 1, x.size(2)))
+                self.estimator.set_input_shape('mu', (B2, 80, x.size(2)))
+                self.estimator.set_input_shape('t', (B2,))
+                self.estimator.set_input_shape('spks', (B2, 80))
+                self.estimator.set_input_shape('cond', (B2, 80, x.size(2)))
                 # run trt engine
                 self.estimator.execute_v2([x.contiguous().data_ptr(),
                                            mask.contiguous().data_ptr(),
@@ -219,9 +223,12 @@ class CausalConditionalCFM(ConditionalCFM):
             sample: generated mel-spectrogram
                 shape: (batch_size, n_feats, mel_timesteps)
         """
-
-        z = self.rand_noise[:, :, :mu.size(2)].to(mu.device).to(mu.dtype) * temperature
-        # fix prompt and overlap part mu and z
+        B = mu.size(0)
+        if B == 1:
+            z = self.rand_noise[:, :, :mu.size(2)].to(mu.device).to(mu.dtype) * temperature
+        else:
+            # Each batch item needs independent noise for diverse outputs
+            z = torch.randn(B, 80, mu.size(2), device=mu.device, dtype=mu.dtype) * temperature
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device, dtype=mu.dtype)
         if self.t_scheduler == 'cosine':
             t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)

@@ -34,7 +34,9 @@ from .decoder import ConditionalDecoder
 
 
 def drop_invalid_tokens(x):
-    assert len(x.shape) <= 2 and x.shape[0] == 1, "only batch size of one allowed for now"
+    if len(x.shape) <= 1:
+        return x[x < SPEECH_VOCAB_SIZE]
+    assert x.shape[0] == 1, "use drop_invalid_tokens on 1D or batch=1 tensors; for batched, handle per-item"
     return x[x < SPEECH_VOCAB_SIZE]
 
 
@@ -315,3 +317,103 @@ class S3Token2Wav(S3Token2Mel):
             output_wavs[:, :len(self.trim_fade)] *= self.trim_fade
 
         return output_wavs, output_sources
+
+    @torch.inference_mode()
+    def batch_inference(
+        self,
+        speech_tokens_list: list[torch.Tensor],
+        ref_dict: dict,
+        finalize: bool = True,
+        no_trim: bool = False,
+        n_timesteps: int = 10,
+    ) -> list[torch.Tensor]:
+        """Batched vocoding: process multiple speech token sequences in a single forward pass.
+
+        Args:
+            speech_tokens_list: List of 1D speech token tensors (variable lengths).
+            ref_dict: Shared reference dict (same speaker for all items).
+            finalize: Whether streaming is finished.
+            no_trim: Skip trim/fade post-processing.
+            n_timesteps: Number of diffusion steps.
+
+        Returns:
+            List of 1D audio waveform tensors, one per input sequence.
+        """
+        if len(speech_tokens_list) == 0:
+            return []
+
+        # Fall back to sequential for single item
+        if len(speech_tokens_list) == 1:
+            wav, _ = self.inference(
+                speech_tokens=speech_tokens_list[0],
+                ref_dict=ref_dict,
+                finalize=finalize,
+                no_trim=no_trim,
+                n_timesteps=n_timesteps,
+            )
+            return [wav.squeeze(0)]
+
+        B = len(speech_tokens_list)
+
+        # Ensure ref_dict tensors are on correct device
+        for rk in list(ref_dict):
+            if isinstance(ref_dict[rk], np.ndarray):
+                ref_dict[rk] = torch.from_numpy(ref_dict[rk])
+            if torch.is_tensor(ref_dict[rk]):
+                ref_dict[rk] = ref_dict[rk].to(self.device)
+
+        # Pad speech tokens to max length in batch
+        token_lens = [len(t) for t in speech_tokens_list]
+        max_len = max(token_lens)
+        padded_tokens = torch.zeros(B, max_len, dtype=torch.long, device=self.device)
+        for i, tokens in enumerate(speech_tokens_list):
+            if len(tokens.shape) == 0:
+                continue
+            t = tokens.to(self.device)
+            padded_tokens[i, :len(t)] = t
+
+        token_len_tensor = torch.tensor(token_lens, dtype=torch.long, device=self.device)
+
+        # Expand shared ref_dict to batch size
+        batched_ref = {}
+        for k, v in ref_dict.items():
+            if torch.is_tensor(v) and v.dim() >= 1 and v.size(0) == 1:
+                batched_ref[k] = v.expand(B, *v.shape[1:])
+            else:
+                batched_ref[k] = v
+
+        # Run batched flow inference (token-to-mel)
+        output_mels = self.flow.inference(
+            token=padded_tokens,
+            token_len=token_len_tensor,
+            finalize=finalize,
+            n_timesteps=n_timesteps,
+            prompt_token=batched_ref['prompt_token'],
+            prompt_token_len=batched_ref.get('prompt_token_len', torch.tensor([batched_ref['prompt_token'].shape[1]] * B, device=self.device)),
+            prompt_feat=batched_ref['prompt_feat'],
+            prompt_feat_len=batched_ref.get('prompt_feat_len'),
+            embedding=batched_ref['embedding'],
+        )
+        if isinstance(output_mels, tuple):
+            output_mels = output_mels[0]
+
+        # Run batched HiFiGAN inference (mel-to-wav)
+        cache_source = torch.zeros(B, 1, 0, device=self.device)
+        output_wavs, _ = self.mel2wav.inference(speech_feat=output_mels, cache_source=cache_source)
+
+        # Apply trim/fade and split per item
+        if not no_trim:
+            output_wavs[:, :len(self.trim_fade)] *= self.trim_fade
+
+        # Crop each item to its actual length (remove padding artifacts)
+        # Each token produces approximately the same number of audio samples
+        results = []
+        total_samples = output_wavs.shape[1]
+        total_mel_frames = output_mels.shape[2]
+        for i in range(B):
+            # Approximate per-item audio length from token ratio
+            item_fraction = token_lens[i] / max_len
+            item_samples = int(total_samples * item_fraction)
+            results.append(output_wavs[i, :item_samples])
+
+        return results

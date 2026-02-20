@@ -253,7 +253,8 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             prompt_feat = prompt_feat.half()
             embedding = embedding.half()
 
-        assert token.shape[0] == 1
+        B = token.shape[0]
+
         # xvec projection
         embedding = F.normalize(embedding, dim=1)
         embedding = self.spk_embed_affine_layer(embedding)
@@ -271,11 +272,11 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         h = self.encoder_proj(h)
 
         # get conditions
-        conds = torch.zeros([1, mel_len1 + mel_len2, self.output_size], device=token.device).to(h.dtype)
+        conds = torch.zeros([B, mel_len1 + mel_len2, self.output_size], device=token.device).to(h.dtype)
         conds[:, :mel_len1] = prompt_feat
         conds = conds.transpose(1, 2)
 
-        mask = (~make_pad_mask(torch.tensor([mel_len1 + mel_len2]))).to(h)
+        mask = (~make_pad_mask(torch.tensor([mel_len1 + mel_len2] * B))).to(h)
         feat, _ = self.decoder(
             mu=h.transpose(1, 2).contiguous(),
             mask=mask.unsqueeze(1),
@@ -285,4 +286,4 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         )
         feat = feat[:, :, mel_len1:]
         assert feat.shape[2] == mel_len2
-        return feat.float(), None  # NOTE jrm: why are they returning None here?
+        return feat.float(), None
