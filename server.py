@@ -50,7 +50,7 @@ async def audio_stream(
     exaggeration: float = 0.5,
     temperature: float = 0.8,
     chunk_size: int = 25,
-    diffusion_steps: int = 10,
+    diffusion_steps: int = 5,
     output_format: str = "pcm",
 ):
     """Async generator that yields PCM bytes (or WAV with header) from streaming TTS."""
@@ -90,7 +90,7 @@ async def tts_get(
     exaggeration: float = Query(0.5, description="Emotion exaggeration factor"),
     temperature: float = Query(0.8, description="Sampling temperature"),
     chunk_size: int = Query(25, description="Tokens per streaming chunk"),
-    diffusion_steps: int = Query(10, description="S3Gen diffusion steps"),
+    diffusion_steps: int = Query(5, description="S3Gen diffusion steps"),
     format: str = Query("wav", description="Output format: 'pcm' or 'wav'"),
 ):
     """Stream TTS audio as raw PCM or WAV."""
@@ -123,7 +123,7 @@ async def tts_post(
     exaggeration: float = Form(0.5),
     temperature: float = Form(0.8),
     chunk_size: int = Form(25),
-    diffusion_steps: int = Form(10),
+    diffusion_steps: int = Form(5),
     format: str = Form("wav"),
 ):
     """Stream TTS audio with optional voice cloning via file upload."""
