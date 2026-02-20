@@ -111,10 +111,11 @@ class ConditionalCFM(BASECFM):
         cond_in = torch.zeros([2 * B, 80, x.size(2)], device=x.device, dtype=x.dtype)
         for step in range(1, len(t_span)):
             # Classifier-Free Guidance: conditioned slots get real data,
-            # unconditioned slots stay zeroed (except x and t)
+            # unconditioned slots stay zeroed (except x, mask, and t)
             x_in[:B] = x
             x_in[B:] = x
             mask_in[:B] = mask
+            mask_in[B:] = mask  # mask must be set for both conditioned and unconditioned slots
             mu_in[:B] = mu
             t_in[:] = t
             spks_in[:B] = spks
