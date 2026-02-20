@@ -33,6 +33,7 @@ from vllm.sequence import IntermediateTensors
 from chatterbox_vllm.models.t3.modules.learned_pos_emb import LearnedPositionEmbeddings
 from chatterbox_vllm.models.t3.modules.t3_config import T3Config
 from .modules.cond_enc import T3Cond, T3CondEnc
+from .alignment import AlignmentState, ALIGNMENT_LAYER_IDX
 
 
 PREFILL_COND_START_TOKEN = 695  # [PLACEHOLDER55]; Marks the first token of the conditionals
@@ -299,6 +300,21 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
         # Tracks the absolute position of the start-of-speech token (PREFILL_END_TOKEN)
         # so we can compute speech positional embedding indices during decode.
         self._speech_start_position: Optional[int] = None
+
+        # --- Alignment analyzer state ---
+        self._alignment_states: dict[int, AlignmentState] = {}  # seq_id -> AlignmentState
+        self._captured_q: Optional[torch.Tensor] = None
+        self._captured_k: Optional[torch.Tensor] = None
+        self._pending_text_k: Optional[torch.Tensor] = None
+        self._pending_text_token_count: int = 0
+
+        # Register hook on layer 9's rotary_emb to capture Q/K after rotary encoding
+        layer9_rotary = self.tfmr.layers[ALIGNMENT_LAYER_IDX].self_attn.rotary_emb
+        def _rotary_hook(module, input, output):
+            q_rotated, k_rotated = output
+            self._captured_q = q_rotated.detach()
+            self._captured_k = k_rotated.detach()
+        layer9_rotary.register_forward_hook(_rotary_hook)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loaded_params: set[str] = set()
@@ -595,29 +611,80 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
 
 
     def compute_logits(self, hidden_states: torch.Tensor, sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        # print("t3/compute_logits/hidden_states", hidden_states.shape, hidden_states.dtype)
-        # print("t3/compute_logits/sampling_metadata", sampling_metadata)
-
-        # Split the hidden state vector into the three parts
+        # Split the hidden state vector into cond and uncond parts
         cond_hidden_states, uncond_hidden_states = hidden_states.split([self.dim, self.dim], dim=1)
-        # print("t3/compute_logits/normal_hidden_states", normal_hidden_states.shape, normal_hidden_states.dtype)
-        # print("t3/compute_logits/cfg_hidden_states", cfg_hidden_states.shape, cfg_hidden_states.dtype)
 
         cond_logits = self.logits_processor(self.speech_head, cond_hidden_states, sampling_metadata)
         uncond_logits = self.logits_processor(self.speech_head, uncond_hidden_states, sampling_metadata)
 
         logits = cond_logits + self.cfg_scale * (cond_logits - uncond_logits)
 
-        # print("t3/compute_logits/logit with the highest probability (cond, uncond, post-cfg):", cond_logits.argmax(), uncond_logits.argmax(), logits.argmax())
+        # --- Alignment analysis (before offset) ---
+        self._apply_alignment_analysis(logits, sampling_metadata)
 
         # HACK: Offset the logits so the resulting speech token is +SPEECH_TOKEN_OFFSET from the normal speech tokens.
-        #       We'll do this by adding SPEECH_TOKEN_OFFSET fake dimensions to the left of the logits.
-        #       This is a hack to help us unbatch batched inputs.
         logits = torch.cat([
             torch.zeros(logits.shape[0], SPEECH_TOKEN_OFFSET).to(logits.device).fill_(float('-inf')),
             logits,
         ], dim=1)
         return logits
+
+    def _apply_alignment_analysis(self, logits: torch.Tensor, sampling_metadata: SamplingMetadata) -> None:
+        """Apply alignment-based EOS forcing/suppression to logits in-place.
+
+        During prefill: Initialize AlignmentState for new sequences using captured text K values.
+        During decode: Compute alignment from captured Q against stored text K, and modify logits.
+        """
+        # Initialize alignment states for newly prefilled sequences
+        if self._pending_text_k is not None:
+            for seq_group in sampling_metadata.seq_groups:
+                for seq_id in seq_group.seq_ids:
+                    if seq_id not in self._alignment_states:
+                        self._alignment_states[seq_id] = AlignmentState(
+                            text_k=self._pending_text_k,
+                            text_token_count=self._pending_text_token_count,
+                            num_heads=16,
+                            head_dim=64,
+                            eos_idx=self.t3conf.stop_speech_token,
+                        )
+            self._pending_text_k = None
+
+        # Apply alignment analysis for decode sequences
+        if self._captured_q is None:
+            return
+
+        # Map from pruned sample index to forward pass position
+        selected_indices = sampling_metadata.selected_token_indices
+
+        # Track active seq_ids for cleanup
+        active_seq_ids = set()
+
+        for seq_group in sampling_metadata.seq_groups:
+            for seq_id, sample_idx in zip(seq_group.seq_ids, seq_group.sample_indices):
+                active_seq_ids.add(seq_id)
+                state = self._alignment_states.get(seq_id)
+                if state is None:
+                    continue
+
+                # Only apply during decode (when there are already generated tokens)
+                past_tokens = seq_group.seq_data[seq_id].output_token_ids
+                if len(past_tokens) == 0:
+                    continue
+
+                # Map sample_idx to the position in self._captured_q
+                if selected_indices is not None and sample_idx < len(selected_indices):
+                    forward_idx = selected_indices[sample_idx].item()
+                else:
+                    forward_idx = sample_idx
+
+                if forward_idx < len(self._captured_q):
+                    q = self._captured_q[forward_idx]
+                    logits[sample_idx] = state.step(q, logits[sample_idx])
+
+        # Clean up alignment states for sequences no longer in the batch
+        stale_ids = [sid for sid in self._alignment_states if sid not in active_seq_ids]
+        for sid in stale_ids:
+            del self._alignment_states[sid]
 
 
     def forward(
@@ -714,6 +781,20 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
             intermediate_tensors=None,
             inputs_embeds=cond_embeds,
         )
+
+        # Capture text K values from the rotary hook for alignment analysis.
+        # Text tokens are between PREFILL_COND_END_TOKEN and PREFILL_END_TOKEN.
+        if input_ids is not None and self._captured_k is not None:
+            cond_end_mask = (input_ids == PREFILL_COND_END_TOKEN)
+            prefill_end_mask = (input_ids == PREFILL_END_TOKEN)
+            if cond_end_mask.any() and prefill_end_mask.any():
+                cond_end_idx = cond_end_mask.nonzero(as_tuple=True)[0][-1].item()
+                prefill_end_idx = prefill_end_mask.nonzero(as_tuple=True)[0][-1].item()
+                text_start = cond_end_idx + 1
+                text_end = prefill_end_idx
+                if text_end > text_start:
+                    self._pending_text_k = self._captured_k[text_start:text_end].clone()
+                    self._pending_text_token_count = text_end - text_start
 
         return torch.cat([cond_hidden, cond_hidden], dim=1)
 
