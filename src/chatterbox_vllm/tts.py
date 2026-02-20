@@ -86,7 +86,7 @@ class VocoderBatcher:
     = 2.8s of serialized vocoding to a single ~300ms batched call.
     """
 
-    def __init__(self, s3gen: S3Gen, max_batch_size: int = 32, max_wait_ms: float = 50):
+    def __init__(self, s3gen: S3Gen, max_batch_size: int = 16, max_wait_ms: float = 20):
         self.s3gen = s3gen
         self.max_batch_size = max_batch_size
         self.max_wait_ms = max_wait_ms
