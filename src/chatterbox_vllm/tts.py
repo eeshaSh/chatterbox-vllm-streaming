@@ -257,10 +257,6 @@ class ChatterboxTTS:
         s3gen.load_state_dict(load_file(ckpt_dir / "s3gen.safetensors"), strict=False)
         s3gen = s3gen.to(device=target_device).eval()
 
-        # Compile the ConditionalDecoder (estimator) which runs once per diffusion
-        # step (5x per vocoder call). This IS called via forward(), unlike the
-        # parent modules which use .inference().
-        s3gen.flow.decoder.estimator = torch.compile(s3gen.flow.decoder.estimator, mode="default", dynamic=True)
 
         default_conds = Conditionals.load(ckpt_dir / "conds.pt")
         default_conds.to(device=target_device)
