@@ -237,14 +237,24 @@ class MTLTokenizer(PreTrainedTokenizer):
         
         return preprocessed_text
 
-    def _tokenize(self, text: str, **kwargs) -> List[str]:        
+    def _tokenize(self, text: str, **kwargs) -> List[str]:
         # Parse out language token if it exists
         # This is injected by the ChatterboxTTS.generate_with_conds method
         language_id = None
         if text.startswith('<'):
             language_id = text.split('<')[1].split('>')[0]
             text = text.split('>')[1]
-        
+
+        # Strip [START]/[STOP] before preprocessing to prevent lowercasing them.
+        # preprocess_text lowercases text, which would turn [START] → [start],
+        # breaking special token recognition in the vocabulary.
+        has_start = text.startswith(SOT)
+        has_stop = text.endswith(EOT)
+        if has_start:
+            text = text[len(SOT):]
+        if has_stop:
+            text = text[:-len(EOT)]
+
         text = self.preprocess_text(text, language_id)
         
         # Language-specific text processing
@@ -262,7 +272,13 @@ class MTLTokenizer(PreTrainedTokenizer):
         # Prepend language token again
         if language_id:
             text = f"[{language_id.lower()}]{text}"
-        
+
+        # Re-add [START]/[STOP] markers (preserved from lowercasing)
+        if has_start:
+            text = SOT + text
+        if has_stop:
+            text = text + EOT
+
         text = text.replace(' ', SPACE)
         return self.tokenizer.encode(text).tokens
 
