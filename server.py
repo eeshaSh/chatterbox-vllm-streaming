@@ -1,4 +1,5 @@
 import struct
+import time
 import numpy as np
 from fastapi import FastAPI, Query, UploadFile, File, Form
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -53,6 +54,9 @@ async def audio_stream(
     output_format: str = "pcm",
 ):
     """Async generator that yields PCM bytes (or WAV with header) from streaming TTS."""
+    request_start = time.time()
+    first_audio_sent = False
+
     if output_format == "wav":
         yield make_wav_header(SAMPLE_RATE, NUM_CHANNELS, SAMPLE_WIDTH * 8)
 
@@ -67,6 +71,10 @@ async def audio_stream(
     ):
         audio_np = audio_chunk.squeeze().cpu().numpy()
         pcm_data = (audio_np * 32767).astype(np.int16).tobytes()
+        if not first_audio_sent:
+            ttfb = time.time() - request_start
+            print(f"[Server] TTFB (request → first audio byte): {ttfb:.3f}s")
+            first_audio_sent = True
         yield pcm_data
 
 
