@@ -257,6 +257,10 @@ class ChatterboxTTS:
         s3gen.load_state_dict(load_file(ckpt_dir / "s3gen.safetensors"), strict=False)
         s3gen = s3gen.to(device=target_device).eval()
 
+        # Compile the heavy submodules for kernel fusion
+        s3gen.flow = torch.compile(s3gen.flow, mode="reduce-overhead")
+        s3gen.mel2wav = torch.compile(s3gen.mel2wav, mode="reduce-overhead")
+
         default_conds = Conditionals.load(ckpt_dir / "conds.pt")
         default_conds.to(device=target_device)
 
