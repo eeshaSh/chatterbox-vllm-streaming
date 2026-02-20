@@ -143,13 +143,14 @@ class VocoderBatcher:
                 if len(batch) > 1:
                     print(f"[VocoderBatcher] Batching {len(batch)} requests together")
 
-                # Run batched S3Gen inference
+                # Run batched S3Gen inference with autocast for Tensor Core utilization
                 try:
-                    results = self.s3gen.batch_inference(
-                        speech_tokens_list=tokens_list,
-                        ref_dict=ref_dict,
-                        n_timesteps=n_timesteps,
-                    )
+                    with torch.autocast("cuda", dtype=torch.float16):
+                        results = self.s3gen.batch_inference(
+                            speech_tokens_list=tokens_list,
+                            ref_dict=ref_dict,
+                            n_timesteps=n_timesteps,
+                        )
                     for (_, _, _, future), result in zip(batch, results):
                         if not future.done():
                             future.set_result(result)
@@ -202,7 +203,7 @@ class ChatterboxTTS:
                    max_batch_size: int = 10,
                    variant: str = "english",
 
-                   s3gen_use_fp16: bool = True,
+                   s3gen_use_fp16: bool = False,
                    **kwargs) -> 'ChatterboxTTS':
         ckpt_dir = Path(ckpt_dir)
 
@@ -465,11 +466,12 @@ class ChatterboxTTS:
                     speech_tokens = drop_invalid_tokens(speech_tokens)
                     speech_tokens = speech_tokens[speech_tokens < 6561]
 
-                    wav, _ = self.s3gen.inference(
-                        speech_tokens=speech_tokens,
-                        ref_dict=s3gen_ref,
-                        n_timesteps=diffusion_steps,
-                    )
+                    with torch.autocast("cuda", dtype=torch.float16):
+                        wav, _ = self.s3gen.inference(
+                            speech_tokens=speech_tokens,
+                            ref_dict=s3gen_ref,
+                            n_timesteps=diffusion_steps,
+                        )
                     results.append(wav.cpu())
             s3gen_gen_time = time.time() - start_time
             print(f"[S3Gen] Wavform Generation time: {s3gen_gen_time:.2f}s")
@@ -502,11 +504,12 @@ class ChatterboxTTS:
         if len(clean_tokens) == 0:
             return None, 0.0, False
 
-        wav, _ = self.s3gen.inference(
-            speech_tokens=clean_tokens,
-            ref_dict=s3gen_ref,
-            n_timesteps=diffusion_steps,
-        )
+        with torch.autocast("cuda", dtype=torch.float16):
+            wav, _ = self.s3gen.inference(
+                speech_tokens=clean_tokens,
+                ref_dict=s3gen_ref,
+                n_timesteps=diffusion_steps,
+            )
         wav = wav.squeeze(0).detach().cpu().numpy()
 
         # Crop out the context portion — only keep audio for the new tokens
