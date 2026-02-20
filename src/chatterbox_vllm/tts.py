@@ -202,8 +202,7 @@ class ChatterboxTTS:
                    max_batch_size: int = 10,
                    variant: str = "english",
 
-                   # Original Chatterbox defaults this to False. I don't see a substantial performance difference when running with FP16.
-                   s3gen_use_fp16: bool = False,
+                   s3gen_use_fp16: bool = True,
                    **kwargs) -> 'ChatterboxTTS':
         ckpt_dir = Path(ckpt_dir)
 
@@ -243,6 +242,7 @@ class ChatterboxTTS:
             "gpu_memory_utilization": vllm_memory_percent,
             "enforce_eager": not compile,
             "max_model_len": max_model_len,
+            "dtype": "half",
         }
 
         engine_args = AsyncEngineArgs(**{**base_vllm_kwargs, **kwargs})
