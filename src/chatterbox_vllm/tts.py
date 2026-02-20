@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union, Tuple, Any, AsyncGenerator
@@ -85,12 +86,15 @@ class VocoderBatcher:
     = 2.8s of serialized vocoding to a single ~300ms batched call.
     """
 
-    def __init__(self, s3gen: S3Gen, max_batch_size: int = 16, max_wait_ms: float = 20):
+    def __init__(self, s3gen: S3Gen, max_batch_size: int = 32, max_wait_ms: float = 50):
         self.s3gen = s3gen
         self.max_batch_size = max_batch_size
         self.max_wait_ms = max_wait_ms
         self._queue: asyncio.Queue = None  # Initialized lazily per event loop
         self._worker_task: asyncio.Task = None
+        # Single-thread executor so vocoder runs off the event loop,
+        # allowing vLLM token generation to continue during vocoding
+        self._executor = ThreadPoolExecutor(max_workers=1)
 
     def _ensure_started(self):
         """Start the batch worker if not already running."""
@@ -143,12 +147,17 @@ class VocoderBatcher:
                 if len(batch) > 1:
                     print(f"[VocoderBatcher] Batching {len(batch)} requests together")
 
-                # Run batched S3Gen inference
+                # Run batched S3Gen inference off the event loop so vLLM
+                # token generation can continue during vocoding
+                loop = asyncio.get_event_loop()
                 try:
-                    results = self.s3gen.batch_inference(
-                        speech_tokens_list=tokens_list,
-                        ref_dict=ref_dict,
-                        n_timesteps=n_timesteps,
+                    results = await loop.run_in_executor(
+                        self._executor,
+                        lambda: self.s3gen.batch_inference(
+                            speech_tokens_list=tokens_list,
+                            ref_dict=ref_dict,
+                            n_timesteps=n_timesteps,
+                        ),
                     )
                     for (_, _, _, future), result in zip(batch, results):
                         if not future.done():
