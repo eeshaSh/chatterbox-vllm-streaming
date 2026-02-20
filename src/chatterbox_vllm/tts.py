@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union, Tuple, Any, AsyncGenerator
+import asyncio
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from vllm import SamplingParams
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -93,6 +95,12 @@ class ChatterboxTTS:
         self.ve = ve
         self.default_conds = default_conds
         self.variant = variant
+
+        # Dedicated thread + CUDA stream for S3Gen vocoding.
+        # This prevents vocoding from blocking the async event loop,
+        # allowing vLLM to continue generating tokens for other requests.
+        self._vocoder_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="s3gen-vocoder")
+        self._vocoder_stream = torch.cuda.Stream()
 
     @property
     def sr(self) -> int:
@@ -405,11 +413,13 @@ class ChatterboxTTS:
         if len(clean_tokens) == 0:
             return None, 0.0, False
 
-        wav, _ = self.s3gen.inference(
-            speech_tokens=clean_tokens,
-            ref_dict=s3gen_ref,
-            n_timesteps=diffusion_steps,
-        )
+        with torch.cuda.stream(self._vocoder_stream):
+            wav, _ = self.s3gen.inference(
+                speech_tokens=clean_tokens,
+                ref_dict=s3gen_ref,
+                n_timesteps=diffusion_steps,
+            )
+        self._vocoder_stream.synchronize()
         wav = wav.squeeze(0).detach().cpu().numpy()
 
         # Crop out the context portion — only keep audio for the new tokens
@@ -565,7 +575,10 @@ class ChatterboxTTS:
                     new_speech_tokens = new_speech_tokens[new_speech_tokens < 6561]
 
                     if len(new_speech_tokens) > 0:
-                        audio_tensor, audio_duration, success = self._process_token_buffer(
+                        loop = asyncio.get_event_loop()
+                        audio_tensor, audio_duration, success = await loop.run_in_executor(
+                            self._vocoder_executor,
+                            self._process_token_buffer,
                             new_speech_tokens,
                             all_tokens_processed,
                             context_window,
@@ -596,5 +609,6 @@ class ChatterboxTTS:
             print(f"[Streaming] Chunks yielded: {metrics.chunk_count}")
 
     def shutdown(self):
+        self._vocoder_executor.shutdown(wait=False)
         del self.async_engine
         torch.cuda.empty_cache()
