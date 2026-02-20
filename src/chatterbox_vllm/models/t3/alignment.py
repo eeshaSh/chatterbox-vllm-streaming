@@ -1,8 +1,5 @@
-import logging
 import torch
 from typing import Optional
-
-logger = logging.getLogger(__name__)
 
 ALIGNMENT_LAYER_IDX = 9
 
@@ -36,6 +33,9 @@ class AlignmentState:
         self.started_at: Optional[int] = None
         self.complete = False
         self.completed_at: Optional[int] = None
+        self.step_count = 0
+
+        print(f"[Alignment] Created state: text_tokens={text_token_count}, eos_idx={eos_idx}, text_k shape={text_k.shape}")
 
     def compute_alignment_scores(self, q: torch.Tensor) -> torch.Tensor:
         """Compute attention scores from decode Q against stored text K.
@@ -61,12 +61,7 @@ class AlignmentState:
     def step(self, q: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
         """Run one alignment analysis step.
 
-        Mirrors the original AlignmentStreamAnalyzer.step() logic:
-        - Tracks text position via argmax of attention over text tokens
-        - Detects completion (position >= S-3)
-        - Detects long_tail (last tokens accumulate too many frames)
-        - Detects repetition (earlier tokens get activation after completion)
-        - Forces/suppresses EOS accordingly
+        Mirrors the original AlignmentStreamAnalyzer.step() logic.
 
         Args:
             q: [num_heads * head_dim] — Q for current decode token
@@ -75,6 +70,7 @@ class AlignmentState:
         Returns:
             Modified logits tensor
         """
+        self.step_count += 1
         alignment_scores = self.compute_alignment_scores(q)  # [S] on CPU
         A_chunk = alignment_scores.unsqueeze(0)  # [1, S]
 
@@ -95,8 +91,7 @@ class AlignmentState:
         if not discontinuity:
             self.text_position = cur_text_posn
 
-        # False start detection — hallucinations at the beginning show up as
-        # activations at the bottom-right of the attention maps
+        # False start detection
         if T >= 2:
             false_start = (not self.started) and (
                 A[-2:, -2:].max() > 0.1 or A[:, :4].max() < 0.5
@@ -107,24 +102,32 @@ class AlignmentState:
         if self.started and self.started_at is None:
             self.started_at = T
 
-        # Completion detection — have we reached the end of text tokens?
+        # Completion detection
+        was_complete = self.complete
         self.complete = self.complete or self.text_position >= S - 3
         if self.complete and self.completed_at is None:
             self.completed_at = T
+            print(f"[Alignment] COMPLETE at step {self.step_count}: text_position={self.text_position}/{S}")
 
-        # Long tail detection — last 3 text tokens accumulating too many frames
+        # Long tail detection
         long_tail = False
         if self.complete and self.completed_at is not None:
             long_tail = A[self.completed_at:, -3:].sum(dim=0).max() >= 10
 
-        # Repetition detection — activations in earlier tokens after completion
+        # Repetition detection
         repetition = False
         if self.complete and self.completed_at is not None and S > 5:
             repetition = A[self.completed_at:, :-5].max(dim=1).values.sum() > 5
 
+        # Debug logging every 25 steps, or on significant events
+        if self.step_count % 25 == 0 or (self.complete and not was_complete):
+            print(f"[Alignment] step={self.step_count} text_pos={self.text_position}/{S} "
+                  f"complete={self.complete} long_tail={long_tail} rep={repetition} "
+                  f"argmax={cur_text_posn} scores_max={alignment_scores.max():.3f}")
+
         # Modify logits to force/suppress EOS
         if long_tail or repetition:
-            logger.warning(f"Forcing EOS token: long_tail={long_tail}, repetition={repetition}")
+            print(f"[Alignment] FORCING EOS at step {self.step_count}: long_tail={long_tail}, repetition={repetition}")
             logits = -(2**15) * torch.ones_like(logits)
             logits[self.eos_idx] = 2**15
         elif cur_text_posn < S - 3:

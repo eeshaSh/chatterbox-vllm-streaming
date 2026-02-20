@@ -795,6 +795,8 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
                 if text_end > text_start:
                     self._pending_text_k = self._captured_k[text_start:text_end].clone()
                     self._pending_text_token_count = text_end - text_start
+                    print(f"[Alignment] Captured text K: {self._pending_text_token_count} text tokens, "
+                          f"positions [{text_start}:{text_end}], captured_k shape={self._captured_k.shape}")
 
         return torch.cat([cond_hidden, cond_hidden], dim=1)
 
