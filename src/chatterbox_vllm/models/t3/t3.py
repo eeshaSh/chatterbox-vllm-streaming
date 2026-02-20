@@ -33,7 +33,7 @@ from vllm.sequence import IntermediateTensors
 from chatterbox_vllm.models.t3.modules.learned_pos_emb import LearnedPositionEmbeddings
 from chatterbox_vllm.models.t3.modules.t3_config import T3Config
 from .modules.cond_enc import T3Cond, T3CondEnc
-from .alignment import AlignmentState, ALIGNMENT_LAYER_IDX
+from .alignment import AlignmentState
 
 
 PREFILL_COND_START_TOKEN = 695  # [PLACEHOLDER55]; Marks the first token of the conditionals
@@ -303,18 +303,7 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
 
         # --- Alignment analyzer state ---
         self._alignment_states: dict[int, AlignmentState] = {}  # seq_id -> AlignmentState
-        self._captured_q: Optional[torch.Tensor] = None
-        self._captured_k: Optional[torch.Tensor] = None
-        self._pending_text_k: Optional[torch.Tensor] = None
-        self._pending_text_token_count: int = 0
-
-        # Register hook on layer 9's rotary_emb to capture Q/K after rotary encoding
-        layer9_rotary = self.tfmr.layers[ALIGNMENT_LAYER_IDX].self_attn.rotary_emb
-        def _rotary_hook(module, input, output):
-            q_rotated, k_rotated = output
-            self._captured_q = q_rotated.detach()
-            self._captured_k = k_rotated.detach()
-        layer9_rotary.register_forward_hook(_rotary_hook)
+        self._pending_text_token_count: Optional[int] = None
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loaded_params: set[str] = set()
@@ -630,31 +619,21 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
         return logits
 
     def _apply_alignment_analysis(self, logits: torch.Tensor, sampling_metadata: SamplingMetadata) -> None:
-        """Apply alignment-based EOS forcing/suppression to logits in-place.
+        """Apply token-count-based EOS forcing/suppression to logits in-place.
 
-        During prefill: Initialize AlignmentState for new sequences using captured text K values.
-        During decode: Compute alignment from captured Q against stored text K, and modify logits.
+        During prefill: Initialize AlignmentState for new sequences with text token count.
+        During decode: Suppress EOS if too early, force EOS if too many tokens generated.
         """
         # Initialize alignment states for newly prefilled sequences
-        if self._pending_text_k is not None:
+        if self._pending_text_token_count is not None:
             for seq_group in sampling_metadata.seq_groups:
                 for seq_id in seq_group.seq_ids:
                     if seq_id not in self._alignment_states:
                         self._alignment_states[seq_id] = AlignmentState(
-                            text_k=self._pending_text_k,
                             text_token_count=self._pending_text_token_count,
-                            num_heads=16,
-                            head_dim=64,
                             eos_idx=self.t3conf.stop_speech_token,
                         )
-            self._pending_text_k = None
-
-        # Apply alignment analysis for decode sequences
-        if self._captured_q is None:
-            return
-
-        # Map from pruned sample index to forward pass position
-        selected_indices = sampling_metadata.selected_token_indices
+            self._pending_text_token_count = None
 
         # Track active seq_ids for cleanup
         active_seq_ids = set()
@@ -671,15 +650,7 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
                 if len(past_tokens) == 0:
                     continue
 
-                # Map sample_idx to the position in self._captured_q
-                if selected_indices is not None and sample_idx < len(selected_indices):
-                    forward_idx = selected_indices[sample_idx].item()
-                else:
-                    forward_idx = sample_idx
-
-                if forward_idx < len(self._captured_q):
-                    q = self._captured_q[forward_idx]
-                    logits[sample_idx] = state.step(q, logits[sample_idx])
+                logits[sample_idx] = state.step(logits[sample_idx])
 
         # Clean up alignment states for sequences no longer in the batch
         stale_ids = [sid for sid in self._alignment_states if sid not in active_seq_ids]
@@ -782,21 +753,18 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
             inputs_embeds=cond_embeds,
         )
 
-        # Capture text K values from the rotary hook for alignment analysis.
+        # Count text tokens for alignment analysis (EOS forcing).
         # Text tokens are between PREFILL_COND_END_TOKEN and PREFILL_END_TOKEN.
-        if input_ids is not None and self._captured_k is not None:
+        if input_ids is not None:
             cond_end_mask = (input_ids == PREFILL_COND_END_TOKEN)
             prefill_end_mask = (input_ids == PREFILL_END_TOKEN)
             if cond_end_mask.any() and prefill_end_mask.any():
                 cond_end_idx = cond_end_mask.nonzero(as_tuple=True)[0][-1].item()
                 prefill_end_idx = prefill_end_mask.nonzero(as_tuple=True)[0][-1].item()
-                text_start = cond_end_idx + 1
-                text_end = prefill_end_idx
-                if text_end > text_start:
-                    self._pending_text_k = self._captured_k[text_start:text_end].clone()
-                    self._pending_text_token_count = text_end - text_start
-                    print(f"[Alignment] Captured text K: {self._pending_text_token_count} text tokens, "
-                          f"positions [{text_start}:{text_end}], captured_k shape={self._captured_k.shape}")
+                text_token_count = prefill_end_idx - cond_end_idx - 1
+                if text_token_count > 0:
+                    self._pending_text_token_count = text_token_count
+                    print(f"[Alignment] Prefill has {text_token_count} text tokens")
 
         return torch.cat([cond_hidden, cond_hidden], dim=1)
 
