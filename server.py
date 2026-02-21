@@ -5,6 +5,7 @@ from fastapi import FastAPI, Query, UploadFile, File, Form
 from fastapi.responses import StreamingResponse, JSONResponse
 from chatterbox_vllm.tts import ChatterboxTTS
 from typing import Optional
+from pathlib import Path
 import tempfile
 import os
 
@@ -17,6 +18,7 @@ print("Model loaded.")
 SAMPLE_RATE = model.sr  # 24000
 NUM_CHANNELS = 1
 SAMPLE_WIDTH = 2  # 16-bit PCM
+
 
 
 def make_wav_header(sample_rate: int, num_channels: int, bits_per_sample: int) -> bytes:
@@ -76,6 +78,55 @@ async def audio_stream(
             print(f"[Server] TTFB (request → first audio byte): {ttfb:.3f}s")
             first_audio_sent = True
         yield pcm_data
+
+
+@app.post("/audio/speech")
+async def audio_speech(
+    input: str = Form(..., description="Text to synthesize"),
+    voice: Optional[UploadFile] = File(None, description="Reference audio for voice cloning"),
+    language_id: str = Form("en"),
+    exaggeration: float = Form(0.5),
+    temperature: float = Form(0.8),
+    chunk_size: int = Form(15),
+    diffusion_steps: int = Form(5),
+):
+    """Speech endpoint. Streams raw PCM audio with optional voice cloning."""
+    audio_prompt_path = None
+    tmp_file = None
+
+    if voice is not None:
+        tmp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        tmp_file.write(await voice.read())
+        tmp_file.close()
+        audio_prompt_path = tmp_file.name
+
+    async def stream_and_cleanup():
+        try:
+            async for chunk in audio_stream(
+                text=input,
+                audio_prompt_path=audio_prompt_path,
+                language_id=language_id,
+                exaggeration=exaggeration,
+                temperature=temperature,
+                chunk_size=chunk_size,
+                diffusion_steps=diffusion_steps,
+                output_format="pcm",
+            ):
+                yield chunk
+        finally:
+            if tmp_file is not None:
+                os.unlink(tmp_file.name)
+
+    return StreamingResponse(
+        stream_and_cleanup(),
+        media_type="application/octet-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Transfer-Encoding": "chunked",
+            "X-Accel-Buffering": "no",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.get("/health")
