@@ -7,7 +7,7 @@ ALIGNMENT_LAYER_IDX = 9
 # The model generates roughly this many speech tokens per text token.
 # These are used to estimate when to suppress/force EOS.
 MIN_SPEECH_PER_TEXT = 1.5  # Below this, suppress EOS (too early)
-MAX_SPEECH_PER_TEXT = 4    # Above this, force EOS (gibberish)
+MAX_SPEECH_PER_TEXT = 6    # Above this, force EOS (gibberish)
 
 
 class AlignmentState:
