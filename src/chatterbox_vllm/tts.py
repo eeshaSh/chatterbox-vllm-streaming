@@ -134,30 +134,36 @@ class VocoderBatcher:
                     except asyncio.TimeoutError:
                         break
 
-                # All items in the batch must share the same ref_dict and n_timesteps
-                # (they do in practice since concurrent requests typically use the same voice)
-                tokens_list = [item[0] for item in batch]
-                ref_dict = batch[0][1]
-                n_timesteps = batch[0][2]
+                # Group items by ref_dict so different voices don't get mixed
+                groups: dict[int, list] = {}
+                for item in batch:
+                    key = id(item[1])  # group by ref_dict object identity
+                    if key not in groups:
+                        groups[key] = []
+                    groups[key].append(item)
 
-                if len(batch) > 1:
-                    print(f"[VocoderBatcher] Batching {len(batch)} requests together")
+                for group in groups.values():
+                    tokens_list = [item[0] for item in group]
+                    ref_dict = group[0][1]
+                    n_timesteps = group[0][2]
 
-                # Run batched S3Gen inference with autocast for Tensor Core utilization
-                try:
-                    with torch.autocast("cuda", dtype=torch.float16):
-                        results = self.s3gen.batch_inference(
-                            speech_tokens_list=tokens_list,
-                            ref_dict=ref_dict,
-                            n_timesteps=n_timesteps,
-                        )
-                    for (_, _, _, future), result in zip(batch, results):
-                        if not future.done():
-                            future.set_result(result)
-                except Exception as e:
-                    for _, _, _, future in batch:
-                        if not future.done():
-                            future.set_exception(e)
+                    if len(group) > 1:
+                        print(f"[VocoderBatcher] Batching {len(group)} requests together (same voice)")
+
+                    try:
+                        with torch.autocast("cuda", dtype=torch.float16):
+                            results = self.s3gen.batch_inference(
+                                speech_tokens_list=tokens_list,
+                                ref_dict=ref_dict,
+                                n_timesteps=n_timesteps,
+                            )
+                        for (_, _, _, future), result in zip(group, results):
+                            if not future.done():
+                                future.set_result(result)
+                    except Exception as e:
+                        for _, _, _, future in group:
+                            if not future.done():
+                                future.set_exception(e)
 
             except Exception as e:
                 # Don't let the worker die from unexpected errors
