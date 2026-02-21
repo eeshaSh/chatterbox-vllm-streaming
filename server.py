@@ -49,7 +49,7 @@ async def audio_stream(
     language_id: str = "en",
     exaggeration: float = 0.5,
     temperature: float = 0.8,
-    chunk_size: int = 25,
+    chunk_size: int = 15,
     diffusion_steps: int = 5,
     output_format: str = "pcm",
 ):
@@ -89,7 +89,7 @@ async def tts_get(
     language_id: str = Query("en", description="Language code"),
     exaggeration: float = Query(0.5, description="Emotion exaggeration factor"),
     temperature: float = Query(0.8, description="Sampling temperature"),
-    chunk_size: int = Query(25, description="Tokens per streaming chunk"),
+    chunk_size: int = Query(15, description="Tokens per streaming chunk"),
     diffusion_steps: int = Query(5, description="S3Gen diffusion steps"),
     format: str = Query("wav", description="Output format: 'pcm' or 'wav'"),
 ):
@@ -122,7 +122,7 @@ async def tts_post(
     language_id: str = Form("en"),
     exaggeration: float = Form(0.5),
     temperature: float = Form(0.8),
-    chunk_size: int = Form(25),
+    chunk_size: int = Form(15),
     diffusion_steps: int = Form(5),
     format: str = Form("wav"),
 ):
