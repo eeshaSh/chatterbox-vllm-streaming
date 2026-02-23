@@ -37,7 +37,7 @@ COPY t3-model-multilingual/ t3-model-multilingual/
 # Copy source code and voice clone files
 COPY src/ src/
 COPY server.py .
-COPY turkish_voice_clone_male.wav .
+COPY voice_clone_wavs/ voice_clone_wavs/
 
 # Install the project itself
 RUN uv sync --frozen --no-dev
