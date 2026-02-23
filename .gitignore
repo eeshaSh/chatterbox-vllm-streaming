@@ -32,7 +32,7 @@ htmlcov/
 
 # Test files
 *.mp3
-*.wav
+/*.wav
 trace.json
 
 # OS
