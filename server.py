@@ -1,15 +1,20 @@
 import struct
 import time
 import numpy as np
-from fastapi import FastAPI, Query, UploadFile, File, Form
+from fastapi import FastAPI, Query, Form
 from fastapi.responses import StreamingResponse, JSONResponse
 from chatterbox_vllm.tts import ChatterboxTTS
 from typing import Optional
 from pathlib import Path
-import tempfile
-import os
 
 app = FastAPI(title="Chatterbox vLLM Streaming TTS")
+
+# Map language codes to voice clone wav files.
+# Languages not in this map (e.g. "en") will use the default model voice.
+VOICE_CLONE_DIR = Path(__file__).parent
+VOICE_CLONE_MAP: dict[str, Path] = {
+    "tr": VOICE_CLONE_DIR / "turkish_voice_clone_male.wav",
+}
 
 print("Loading multilingual model on cuda...")
 model = ChatterboxTTS.from_pretrained_multilingual()
@@ -47,7 +52,6 @@ def make_wav_header(sample_rate: int, num_channels: int, bits_per_sample: int) -
 
 async def audio_stream(
     text: str,
-    audio_prompt_path: Optional[str] = None,
     language_id: str = "en",
     exaggeration: float = 0.5,
     temperature: float = 0.8,
@@ -58,6 +62,12 @@ async def audio_stream(
     """Async generator that yields PCM bytes (or WAV with header) from streaming TTS."""
     request_start = time.time()
     first_audio_sent = False
+
+    # Resolve voice clone file from language, if one is mapped
+    audio_prompt_path = None
+    voice_file = VOICE_CLONE_MAP.get(language_id)
+    if voice_file is not None:
+        audio_prompt_path = str(voice_file)
 
     if output_format == "wav":
         yield make_wav_header(SAMPLE_RATE, NUM_CHANNELS, SAMPLE_WIDTH * 8)
@@ -83,42 +93,23 @@ async def audio_stream(
 @app.post("/audio/speech")
 async def audio_speech(
     input: str = Form(..., description="Text to synthesize"),
-    voice: Optional[UploadFile] = File(None, description="Reference audio for voice cloning"),
     language_id: str = Form("en"),
     exaggeration: float = Form(0.5),
     temperature: float = Form(0.8),
     chunk_size: int = Form(15),
     diffusion_steps: int = Form(5),
 ):
-    """Speech endpoint. Streams raw PCM audio with optional voice cloning."""
-    audio_prompt_path = None
-    tmp_file = None
-
-    if voice is not None:
-        tmp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        tmp_file.write(await voice.read())
-        tmp_file.close()
-        audio_prompt_path = tmp_file.name
-
-    async def stream_and_cleanup():
-        try:
-            async for chunk in audio_stream(
-                text=input,
-                audio_prompt_path=audio_prompt_path,
-                language_id=language_id,
-                exaggeration=exaggeration,
-                temperature=temperature,
-                chunk_size=chunk_size,
-                diffusion_steps=diffusion_steps,
-                output_format="pcm",
-            ):
-                yield chunk
-        finally:
-            if tmp_file is not None:
-                os.unlink(tmp_file.name)
-
+    """Speech endpoint. Streams raw PCM audio. Voice cloning is automatic based on language_id."""
     return StreamingResponse(
-        stream_and_cleanup(),
+        audio_stream(
+            text=input,
+            language_id=language_id,
+            exaggeration=exaggeration,
+            temperature=temperature,
+            chunk_size=chunk_size,
+            diffusion_steps=diffusion_steps,
+            output_format="pcm",
+        ),
         media_type="application/octet-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -169,7 +160,6 @@ async def tts_get(
 @app.post("/tts")
 async def tts_post(
     text: str = Form(..., description="Text to synthesize"),
-    audio_prompt: Optional[UploadFile] = File(None, description="Reference audio for voice cloning"),
     language_id: str = Form("en"),
     exaggeration: float = Form(0.5),
     temperature: float = Form(0.8),
@@ -177,36 +167,18 @@ async def tts_post(
     diffusion_steps: int = Form(5),
     format: str = Form("wav"),
 ):
-    """Stream TTS audio with optional voice cloning via file upload."""
-    audio_prompt_path = None
-    tmp_file = None
-
-    if audio_prompt is not None:
-        tmp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        tmp_file.write(await audio_prompt.read())
-        tmp_file.close()
-        audio_prompt_path = tmp_file.name
-
-    async def stream_and_cleanup():
-        try:
-            async for chunk in audio_stream(
-                text=text,
-                audio_prompt_path=audio_prompt_path,
-                language_id=language_id,
-                exaggeration=exaggeration,
-                temperature=temperature,
-                chunk_size=chunk_size,
-                diffusion_steps=diffusion_steps,
-                output_format=format,
-            ):
-                yield chunk
-        finally:
-            if tmp_file is not None:
-                os.unlink(tmp_file.name)
-
+    """Stream TTS audio. Voice cloning is automatic based on language_id."""
     content_type = "audio/wav" if format == "wav" else "audio/L16;rate=24000;channels=1"
     return StreamingResponse(
-        stream_and_cleanup(),
+        audio_stream(
+            text=text,
+            language_id=language_id,
+            exaggeration=exaggeration,
+            temperature=temperature,
+            chunk_size=chunk_size,
+            diffusion_steps=diffusion_steps,
+            output_format=format,
+        ),
         media_type=content_type,
         headers={
             "Cache-Control": "no-cache",
