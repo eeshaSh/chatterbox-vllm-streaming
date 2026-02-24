@@ -2,8 +2,6 @@
 
 This is a port of https://github.com/resemble-ai/chatterbox to vLLM, with streaming and multilingual text.
 
-DISCLAIMER: THIS IS A PERSONAL PROJECT and is not affiliated with my employer or any other corporate entity in any way. The project is based solely on publicly-available information. All opinions are my own and do not necessarily represent the views of my employer.
-
 
 ```
 VLLM_USE_V1=0 uvicorn server:app --host 0.0.0.0 --port 4123
@@ -26,7 +24,14 @@ tbd
 
 # Installation
 
-This project only supports Linux and WSL2 with Nvidia hardware. AMD _may_ work with minor tweaks, but is not tested.
+## Docker
+
+```
+docker build -t chatterbox-vllm .
+docker run --gpus all -p 4123:4123 chatterbox-vllm
+```
+
+## UV Venv
 
 Prerequisites: `git` and [`uv`](https://pypi.org/project/uv/) must be installed
 
