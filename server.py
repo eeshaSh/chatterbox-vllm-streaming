@@ -14,7 +14,8 @@ app = FastAPI(title="Chatterbox vLLM Streaming TTS")
 # Languages not in this map (e.g. "en") will use the default model voice.
 VOICE_CLONE_DIR = Path(__file__).parent / "voice_clone_wavs"
 VOICE_CLONE_MAP: dict[str, Path] = {
-    "tr": VOICE_CLONE_DIR / "turkish_voice_clone_male.wav",
+    "tr": VOICE_CLONE_DIR / "turkish_voice_clone_male_2.wav",
+    "no": VOICE_CLONE_DIR / "norwegian_voice_clone_female_2.wav",
 }
 
 print("Loading multilingual model on cuda...")
