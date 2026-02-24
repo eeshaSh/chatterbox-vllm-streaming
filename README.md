@@ -2,8 +2,6 @@
 
 This is a port of https://github.com/resemble-ai/chatterbox to vLLM, with streaming and multilingual text.
 
-DISCLAIMER: THIS IS A PERSONAL PROJECT and is not affiliated with my employer or any other corporate entity in any way. The project is based solely on publicly-available information. All opinions are my own and do not necessarily represent the views of my employer.
-
 
 ```
 VLLM_USE_V1=0 uvicorn server:app --host 0.0.0.0 --port 4123
