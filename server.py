@@ -6,6 +6,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from chatterbox_vllm.tts import ChatterboxTTS
 from typing import Optional
 from pathlib import Path
+from pydantic import BaseModel
 
 app = FastAPI(title="Chatterbox vLLM Streaming TTS")
 
@@ -90,24 +91,26 @@ async def audio_stream(
         yield pcm_data
 
 
+class SpeechRequest(BaseModel):
+    input: str
+    language_id: str = "en"
+    exaggeration: float = 0.5
+    temperature: float = 0.8
+    chunk_size: int = 15
+    diffusion_steps: int = 5
+
+
 @app.post("/audio/speech")
-async def audio_speech(
-    input: str = Form(..., description="Text to synthesize"),
-    language_id: str = Form("en"),
-    exaggeration: float = Form(0.5),
-    temperature: float = Form(0.8),
-    chunk_size: int = Form(15),
-    diffusion_steps: int = Form(5),
-):
+async def audio_speech(request: SpeechRequest):
     """Speech endpoint. Streams raw PCM audio. Voice cloning is automatic based on language_id."""
     return StreamingResponse(
         audio_stream(
-            text=input,
-            language_id=language_id,
-            exaggeration=exaggeration,
-            temperature=temperature,
-            chunk_size=chunk_size,
-            diffusion_steps=diffusion_steps,
+            text=request.input,
+            language_id=request.language_id,
+            exaggeration=request.exaggeration,
+            temperature=request.temperature,
+            chunk_size=request.chunk_size,
+            diffusion_steps=request.diffusion_steps,
             output_format="pcm",
         ),
         media_type="application/octet-stream",
