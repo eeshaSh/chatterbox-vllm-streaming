@@ -26,7 +26,14 @@ tbd
 
 # Installation
 
-This project only supports Linux and WSL2 with Nvidia hardware. AMD _may_ work with minor tweaks, but is not tested.
+## Docker
+
+```
+docker build -t chatterbox-vllm .
+docker run --gpus all -p 4123:4123 chatterbox-vllm
+```
+
+## UV Venv
 
 Prerequisites: `git` and [`uv`](https://pypi.org/project/uv/) must be installed
 
