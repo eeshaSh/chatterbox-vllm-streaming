@@ -28,62 +28,6 @@ from .models.t3.modules.cond_enc import T3Cond, T3CondEnc
 from .models.t3.modules.learned_pos_emb import LearnedPositionEmbeddings
 from .text_utils import punc_norm, SUPPORTED_LANGUAGES
 
-# Energy-based noise filtering parameters
-ENERGY_WINDOW_MS = 10  # Window size in ms for RMS computation
-SPIKE_THRESHOLD = 4.0  # Windows with RMS > this × running avg are considered noise
-RUNNING_AVG_ALPHA = 0.1  # Smoothing factor for running energy average
-
-
-def filter_energy_spikes(audio_np: np.ndarray, running_rms: float, sample_rate: int) -> tuple[np.ndarray, float]:
-    """Filter out energy spikes (metallic clanging, squeals) from an audio chunk.
-
-    Computes RMS energy over small windows. Windows with energy far above the
-    running average are attenuated. Returns the filtered audio and updated
-    running RMS estimate.
-
-    On the first chunk (running_rms == 0), no filtering is applied — we only
-    use it to establish a baseline from the median window energy.
-    """
-    if len(audio_np) == 0:
-        return audio_np, running_rms
-
-    window_samples = int(sample_rate * ENERGY_WINDOW_MS / 1000)
-    num_windows = len(audio_np) // window_samples
-
-    if num_windows == 0:
-        return audio_np, running_rms
-
-    # Compute per-window RMS values
-    window_rms_values = []
-    for i in range(num_windows):
-        start = i * window_samples
-        end = start + window_samples
-        window_rms_values.append(np.sqrt(np.mean(audio_np[start:end] ** 2)))
-
-    # First chunk: establish baseline from median window energy, no filtering
-    if running_rms == 0:
-        nonzero = [r for r in window_rms_values if r > 0]
-        if nonzero:
-            running_rms = float(np.median(nonzero))
-            print(f"[EnergyFilter] Initialized running_rms={running_rms:.6f} from median of {len(nonzero)} windows")
-        return audio_np, running_rms
-
-    # Subsequent chunks: attenuate spikes
-    filtered = audio_np.copy()
-    for i in range(num_windows):
-        start = i * window_samples
-        end = start + window_samples
-        wrms = window_rms_values[i]
-
-        if wrms > SPIKE_THRESHOLD * running_rms:
-            scale = running_rms / wrms
-            filtered[start:end] = filtered[start:end] * scale
-            print(f"[EnergyFilter] Attenuated spike: window_rms={wrms:.4f}, "
-                  f"running_rms={running_rms:.4f}, scale={scale:.4f}")
-        elif wrms > 0:
-            running_rms = (1 - RUNNING_AVG_ALPHA) * running_rms + RUNNING_AVG_ALPHA * wrms
-
-    return filtered, running_rms
 
 REPO_ID = "ResembleAI/chatterbox"
 
@@ -775,7 +719,6 @@ class ChatterboxTTS:
         start_time = time.time()
         metrics = StreamingMetrics()
         total_audio_length = 0.0
-        running_rms = 0.0
 
         token_buffer: list[int] = []
         all_tokens_processed = torch.tensor([], dtype=torch.long, device=self.target_device)
@@ -810,11 +753,6 @@ class ChatterboxTTS:
                         )
 
                         if success:
-                            # Filter energy spikes before yielding
-                            audio_np = audio_tensor.squeeze().cpu().numpy()
-                            audio_np, running_rms = filter_energy_spikes(audio_np, running_rms, self.sr)
-                            audio_tensor = torch.from_numpy(audio_np).unsqueeze(0).to(audio_tensor.device)
-
                             total_audio_length += audio_duration
                             yield audio_tensor, metrics
 
