@@ -40,33 +40,48 @@ def filter_energy_spikes(audio_np: np.ndarray, running_rms: float, sample_rate: 
     Computes RMS energy over small windows. Windows with energy far above the
     running average are attenuated. Returns the filtered audio and updated
     running RMS estimate.
+
+    On the first chunk (running_rms == 0), no filtering is applied — we only
+    use it to establish a baseline from the median window energy.
     """
     if len(audio_np) == 0:
         return audio_np, running_rms
 
     window_samples = int(sample_rate * ENERGY_WINDOW_MS / 1000)
-    filtered = audio_np.copy()
-    num_windows = len(filtered) // window_samples
+    num_windows = len(audio_np) // window_samples
 
+    if num_windows == 0:
+        return audio_np, running_rms
+
+    # Compute per-window RMS values
+    window_rms_values = []
     for i in range(num_windows):
         start = i * window_samples
         end = start + window_samples
-        window = filtered[start:end]
-        window_rms = np.sqrt(np.mean(window ** 2))
+        window_rms_values.append(np.sqrt(np.mean(audio_np[start:end] ** 2)))
 
-        if running_rms > 0 and window_rms > SPIKE_THRESHOLD * running_rms:
-            scale = running_rms / window_rms
-            filtered[start:end] = window * scale
-            print(f"[EnergyFilter] Attenuated spike: window_rms={window_rms:.4f}, "
-                  f"running_rms={running_rms:.4f}, scale={scale:.4f}")
-        elif window_rms > 0:
-            running_rms = (1 - RUNNING_AVG_ALPHA) * running_rms + RUNNING_AVG_ALPHA * window_rms
-
-    # Bootstrap: if running_rms is still 0, initialize from this chunk
+    # First chunk: establish baseline from median window energy, no filtering
     if running_rms == 0:
-        chunk_rms = np.sqrt(np.mean(filtered ** 2))
-        if chunk_rms > 0:
-            running_rms = chunk_rms
+        nonzero = [r for r in window_rms_values if r > 0]
+        if nonzero:
+            running_rms = float(np.median(nonzero))
+            print(f"[EnergyFilter] Initialized running_rms={running_rms:.6f} from median of {len(nonzero)} windows")
+        return audio_np, running_rms
+
+    # Subsequent chunks: attenuate spikes
+    filtered = audio_np.copy()
+    for i in range(num_windows):
+        start = i * window_samples
+        end = start + window_samples
+        wrms = window_rms_values[i]
+
+        if wrms > SPIKE_THRESHOLD * running_rms:
+            scale = running_rms / wrms
+            filtered[start:end] = filtered[start:end] * scale
+            print(f"[EnergyFilter] Attenuated spike: window_rms={wrms:.4f}, "
+                  f"running_rms={running_rms:.4f}, scale={scale:.4f}")
+        elif wrms > 0:
+            running_rms = (1 - RUNNING_AVG_ALPHA) * running_rms + RUNNING_AVG_ALPHA * wrms
 
     return filtered, running_rms
 
