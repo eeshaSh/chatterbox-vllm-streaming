@@ -7,15 +7,25 @@ This is a port of https://github.com/resemble-ai/chatterbox to vLLM, with stream
 VLLM_USE_V1=0 uvicorn server:app --host 0.0.0.0 --port 4123
 ```
 ```
-curl -N -X POST "http://20.163.2.63:4123/tts" -F "text=Adım Ece ve on iki yaşındayım. Her sabah 7'de uyanırım, kahvaltımı yaparım ve okula giderim." -F "language_id=tr" -F "audio_prompt=@turkish_voice_clone_male.wav" -F "format=pcm" | ffplay -f s16le -ar 24000 -nodisp -autoexit -
+curl -N -X POST "http://20.163.2.63:4123/tts"  -d '{"input": "Adım Ece ve on iki yaşındayım. Her sabah 7'\''de uyanırım, kahvaltımı yaparım ve okula giderim.", "language_id": "tr"}' | ffplay -f s16le -ar 24000 -nodisp -autoexit -
 
-for i in {1..10}; do
-    curl -s -X POST "http://20.163.2.63:4123/tts" \
-        -F "text=hi, my name is eesha, and this is a test for chatterbox tts" \
-        -F "format=wav" \
-        -o "output_${i}.wav" &
+
+for i in {1..2}; do
+  # Turkish Request (Background)
+  (curl -s -N -X POST "http://23.100.39.56:4123/audio/speech" \
+    -H "Content-Type: application/json" \
+    -d '{"input": "Adım Ece ve on iki yaşındayım. Her sabah 7'\''de uyanırım, kahvaltımı yaparım ve okula giderim.", "language_id": "tr"}' \
+  | ffmpeg -y -f s16le -ar 24000 -ac 1 -i pipe:0 "output_tr_${i}.wav" -hide_banner -loglevel error) > /dev/null 2>&1 &
+
+  # Norwegian Request (Background)
+  (curl -s -N -X POST "http://23.100.39.56:4123/audio/speech" \
+    -H "Content-Type: application/json" \
+    -d '{"input": "Hei, hvordan kan jeg hjelpe deg med kjøretøyet ditt i dag?", "language_id": "no"}' \
+  | ffmpeg -y -f s16le -ar 24000 -ac 1 -i pipe:0 "output_no_${i}.wav" -hide_banner -loglevel error) > /dev/null 2>&1 &
 done
+
 wait
+echo "All 10 requests (5 TR, 5 NO) finished."
 ```
 
 
