@@ -208,7 +208,7 @@ class VocoderBatcher:
                         print(f"[VocoderBatcher] Batching {len(group)} requests together (same voice)")
 
                     try:
-                        with torch.autocast("cuda", dtype=torch.float16):
+                        with torch.autocast("cuda", dtype=torch.bfloat16):
                             results = self.s3gen.batch_inference(
                                 speech_tokens_list=tokens_list,
                                 ref_dict=ref_dict,
@@ -318,7 +318,7 @@ class ChatterboxTTS:
 
         s3gen = S3Gen(use_fp16=s3gen_use_fp16)
         s3gen.load_state_dict(load_file(ckpt_dir / "s3gen.safetensors"), strict=False)
-        s3gen = s3gen.to(device=target_device).eval()
+        s3gen = s3gen.to(device=target_device, dtype=torch.bfloat16).eval()
 
 
         default_conds = Conditionals.load(ckpt_dir / "conds.pt")
@@ -382,11 +382,13 @@ class ChatterboxTTS:
             ref_16k_wav = librosa.resample(s3gen_ref_wav, orig_sr=S3GEN_SR, target_sr=S3_SR)
 
             s3gen_ref_wav = s3gen_ref_wav[:self.DEC_COND_LEN]
-            s3gen_ref_dict = self.s3gen.embed_ref(s3gen_ref_wav, S3GEN_SR)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                s3gen_ref_dict = self.s3gen.embed_ref(s3gen_ref_wav, S3GEN_SR)
 
             # Speech cond prompt tokens
             s3_tokzr = self.s3gen.tokenizer
-            t3_cond_prompt_tokens, _ = s3_tokzr.forward([ref_16k_wav[:self.ENC_COND_LEN]], max_len=self.t3_config.speech_cond_prompt_len)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                t3_cond_prompt_tokens, _ = s3_tokzr.forward([ref_16k_wav[:self.ENC_COND_LEN]], max_len=self.t3_config.speech_cond_prompt_len)
             t3_cond_prompt_tokens = torch.atleast_2d(t3_cond_prompt_tokens)
 
             # Voice-encoder speaker embedding
@@ -530,7 +532,7 @@ class ChatterboxTTS:
                     speech_tokens = drop_invalid_tokens(speech_tokens)
                     speech_tokens = speech_tokens[speech_tokens < 6561]
 
-                    with torch.autocast("cuda", dtype=torch.float16):
+                    with torch.autocast("cuda", dtype=torch.bfloat16):
                         wav, _ = self.s3gen.inference(
                             speech_tokens=speech_tokens,
                             ref_dict=s3gen_ref,
@@ -568,7 +570,7 @@ class ChatterboxTTS:
         if len(clean_tokens) == 0:
             return None, 0.0, False
 
-        with torch.autocast("cuda", dtype=torch.float16):
+        with torch.autocast("cuda", dtype=torch.bfloat16):
             wav, _ = self.s3gen.inference(
                 speech_tokens=clean_tokens,
                 ref_dict=s3gen_ref,
