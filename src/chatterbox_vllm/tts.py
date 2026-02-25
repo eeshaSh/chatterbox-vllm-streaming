@@ -318,7 +318,12 @@ class ChatterboxTTS:
 
         s3gen = S3Gen(use_fp16=s3gen_use_fp16)
         s3gen.load_state_dict(load_file(ckpt_dir / "s3gen.safetensors"), strict=False)
-        s3gen = s3gen.to(device=target_device, dtype=torch.bfloat16).eval()
+        s3gen = s3gen.to(device=target_device).eval()
+        # Convert compute-heavy modules to bfloat16 for speed/memory.
+        # Keep tokenizer in float32 because torch.stft (cuFFT) doesn't support bfloat16.
+        s3gen.flow.to(dtype=torch.bfloat16)
+        s3gen.speaker_encoder.to(dtype=torch.bfloat16)
+        s3gen.mel2wav.to(dtype=torch.bfloat16)
 
 
         default_conds = Conditionals.load(ckpt_dir / "conds.pt")
