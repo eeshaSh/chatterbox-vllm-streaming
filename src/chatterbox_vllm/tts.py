@@ -28,6 +28,48 @@ from .models.t3.modules.cond_enc import T3Cond, T3CondEnc
 from .models.t3.modules.learned_pos_emb import LearnedPositionEmbeddings
 from .text_utils import punc_norm, SUPPORTED_LANGUAGES
 
+# Energy-based noise filtering parameters
+ENERGY_WINDOW_MS = 10  # Window size in ms for RMS computation
+SPIKE_THRESHOLD = 4.0  # Windows with RMS > this × running avg are considered noise
+RUNNING_AVG_ALPHA = 0.1  # Smoothing factor for running energy average
+
+
+def filter_energy_spikes(audio_np: np.ndarray, running_rms: float, sample_rate: int) -> tuple[np.ndarray, float]:
+    """Filter out energy spikes (metallic clanging, squeals) from an audio chunk.
+
+    Computes RMS energy over small windows. Windows with energy far above the
+    running average are attenuated. Returns the filtered audio and updated
+    running RMS estimate.
+    """
+    if len(audio_np) == 0:
+        return audio_np, running_rms
+
+    window_samples = int(sample_rate * ENERGY_WINDOW_MS / 1000)
+    filtered = audio_np.copy()
+    num_windows = len(filtered) // window_samples
+
+    for i in range(num_windows):
+        start = i * window_samples
+        end = start + window_samples
+        window = filtered[start:end]
+        window_rms = np.sqrt(np.mean(window ** 2))
+
+        if running_rms > 0 and window_rms > SPIKE_THRESHOLD * running_rms:
+            scale = running_rms / window_rms
+            filtered[start:end] = window * scale
+            print(f"[EnergyFilter] Attenuated spike: window_rms={window_rms:.4f}, "
+                  f"running_rms={running_rms:.4f}, scale={scale:.4f}")
+        elif window_rms > 0:
+            running_rms = (1 - RUNNING_AVG_ALPHA) * running_rms + RUNNING_AVG_ALPHA * window_rms
+
+    # Bootstrap: if running_rms is still 0, initialize from this chunk
+    if running_rms == 0:
+        chunk_rms = np.sqrt(np.mean(filtered ** 2))
+        if chunk_rms > 0:
+            running_rms = chunk_rms
+
+    return filtered, running_rms
+
 REPO_ID = "ResembleAI/chatterbox"
 
 @dataclass
@@ -711,6 +753,7 @@ class ChatterboxTTS:
         start_time = time.time()
         metrics = StreamingMetrics()
         total_audio_length = 0.0
+        running_rms = 0.0
 
         token_buffer: list[int] = []
         all_tokens_processed = torch.tensor([], dtype=torch.long, device=self.target_device)
@@ -745,6 +788,11 @@ class ChatterboxTTS:
                         )
 
                         if success:
+                            # Filter energy spikes before yielding
+                            audio_np = audio_tensor.squeeze().cpu().numpy()
+                            audio_np, running_rms = filter_energy_spikes(audio_np, running_rms, self.sr)
+                            audio_tensor = torch.from_numpy(audio_np).unsqueeze(0).to(audio_tensor.device)
+
                             total_audio_length += audio_duration
                             yield audio_tensor, metrics
 

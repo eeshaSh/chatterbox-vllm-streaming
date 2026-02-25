@@ -27,7 +27,6 @@ NUM_CHANNELS = 1
 SAMPLE_WIDTH = 2  # 16-bit PCM
 
 
-
 def make_wav_header(sample_rate: int, num_channels: int, bits_per_sample: int) -> bytes:
     """Create a WAV header for streaming (unknown data size)."""
     data_size = 0xFFFFFFFF
