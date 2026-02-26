@@ -83,7 +83,9 @@ async def audio_stream(
         diffusion_steps=diffusion_steps,
     ):
         audio_np = audio_chunk.squeeze().cpu().numpy()
-        pcm_data = (audio_np * 32767).astype(np.int16).tobytes()
+        audio_np = np.nan_to_num(audio_np, nan=0.0, posinf=0.0, neginf=0.0)
+        audio_np = np.clip(audio_np, -1.0, 1.0)
+        pcm_data = (audio_np * np.iinfo(np.int16).max).astype("<i2", copy=False).tobytes()
         if not first_audio_sent:
             ttfb = time.time() - request_start
             print(f"[Server] TTFB (request → first audio byte): {ttfb:.3f}s")
