@@ -309,14 +309,30 @@ class S3Token2Wav(S3Token2Mel):
         no_trim: bool = False,
         n_timesteps: int = 10,
     ):
+        flow_start_evt = torch.cuda.Event(enable_timing=True)
+        flow_end_evt = torch.cuda.Event(enable_timing=True)
+        hifigan_start_evt = torch.cuda.Event(enable_timing=True)
+        hifigan_end_evt = torch.cuda.Event(enable_timing=True)
+
+        flow_start_evt.record()
         output_mels = self.flow_inference(speech_tokens, ref_wav=ref_wav, ref_sr=ref_sr, ref_dict=ref_dict, finalize=finalize, n_timesteps=n_timesteps)
+        flow_end_evt.record()
+
+        hifigan_start_evt.record()
         output_wavs, output_sources = self.hift_inference(output_mels, cache_source)
+        hifigan_end_evt.record()
+
+        torch.cuda.synchronize()
+        timing = {
+            "flow_ms": flow_start_evt.elapsed_time(flow_end_evt),
+            "hifigan_ms": hifigan_start_evt.elapsed_time(hifigan_end_evt),
+        }
 
         # NOTE: ad-hoc method to reduce "spillover" from the reference clip.
         if not no_trim:
             output_wavs[:, :len(self.trim_fade)] *= self.trim_fade
 
-        return output_wavs, output_sources
+        return output_wavs, output_sources, timing
 
     @torch.inference_mode()
     def batch_inference(
@@ -326,7 +342,7 @@ class S3Token2Wav(S3Token2Mel):
         finalize: bool = True,
         no_trim: bool = False,
         n_timesteps: int = 10,
-    ) -> list[torch.Tensor]:
+    ) -> tuple[list[torch.Tensor], dict]:
         """Batched vocoding: process multiple speech token sequences in a single forward pass.
 
         Args:
@@ -337,21 +353,21 @@ class S3Token2Wav(S3Token2Mel):
             n_timesteps: Number of diffusion steps.
 
         Returns:
-            List of 1D audio waveform tensors, one per input sequence.
+            Tuple of (list of 1D audio waveform tensors, timing dict with flow_ms and hifigan_ms).
         """
         if len(speech_tokens_list) == 0:
-            return []
+            return [], {"flow_ms": 0.0, "hifigan_ms": 0.0}
 
         # Fall back to sequential for single item
         if len(speech_tokens_list) == 1:
-            wav, _ = self.inference(
+            wav, _, timing = self.inference(
                 speech_tokens=speech_tokens_list[0],
                 ref_dict=ref_dict,
                 finalize=finalize,
                 no_trim=no_trim,
                 n_timesteps=n_timesteps,
             )
-            return [wav.squeeze(0)]
+            return [wav.squeeze(0)], timing
 
         B = len(speech_tokens_list)
 
@@ -383,6 +399,12 @@ class S3Token2Wav(S3Token2Mel):
                 batched_ref[k] = v
 
         # Run batched flow inference (token-to-mel)
+        flow_start_evt = torch.cuda.Event(enable_timing=True)
+        flow_end_evt = torch.cuda.Event(enable_timing=True)
+        hifigan_start_evt = torch.cuda.Event(enable_timing=True)
+        hifigan_end_evt = torch.cuda.Event(enable_timing=True)
+
+        flow_start_evt.record()
         output_mels = self.flow.inference(
             token=padded_tokens,
             token_len=token_len_tensor,
@@ -394,12 +416,21 @@ class S3Token2Wav(S3Token2Mel):
             prompt_feat_len=batched_ref.get('prompt_feat_len'),
             embedding=batched_ref['embedding'],
         )
+        flow_end_evt.record()
         if isinstance(output_mels, tuple):
             output_mels = output_mels[0]
 
         # Run batched HiFiGAN inference (mel-to-wav)
+        hifigan_start_evt.record()
         cache_source = torch.zeros(B, 1, 0, device=self.device)
         output_wavs, _ = self.mel2wav.inference(speech_feat=output_mels, cache_source=cache_source)
+        hifigan_end_evt.record()
+
+        torch.cuda.synchronize()
+        timing = {
+            "flow_ms": flow_start_evt.elapsed_time(flow_end_evt),
+            "hifigan_ms": hifigan_start_evt.elapsed_time(hifigan_end_evt),
+        }
 
         # Apply trim/fade and split per item
         if not no_trim:
@@ -416,4 +447,4 @@ class S3Token2Wav(S3Token2Mel):
             item_samples = int(total_samples * item_fraction)
             results.append(output_wavs[i, :item_samples])
 
-        return results
+        return results, timing

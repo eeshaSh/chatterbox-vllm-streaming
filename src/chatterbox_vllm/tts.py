@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union, Tuple, Any, AsyncGenerator
 import asyncio
@@ -73,6 +73,64 @@ class StreamingMetrics:
     total_audio_duration: Optional[float] = None
     chunk_count: int = 0
 
+    # T3 token generation metrics
+    t3_tokens_generated: int = 0
+    t3_tokens_per_second: Optional[float] = None
+    t3_time_to_first_token: Optional[float] = None
+    t3_total_time: Optional[float] = None
+
+    # S3Gen vocoding metrics (per-chunk lists, averaged in summary)
+    flow_times: list = field(default_factory=list)
+    hifigan_times: list = field(default_factory=list)
+    batcher_wait_times: list = field(default_factory=list)
+    batch_sizes: list = field(default_factory=list)
+    chunk_latencies: list = field(default_factory=list)
+
+    def summary(self) -> str:
+        lines = []
+        lines.append("=== TTS Request Metrics ===")
+
+        lines.append("T3 Token Generation:")
+        lines.append(f"  Tokens generated: {self.t3_tokens_generated}")
+        if self.t3_time_to_first_token is not None:
+            lines.append(f"  Time to first token: {self.t3_time_to_first_token * 1000:.1f}ms")
+        if self.t3_tokens_per_second is not None:
+            lines.append(f"  Tokens/sec: {self.t3_tokens_per_second:.1f}")
+        if self.t3_total_time is not None:
+            lines.append(f"  Total T3 time: {self.t3_total_time:.2f}s")
+
+        lines.append("S3Gen Vocoding:")
+        lines.append(f"  Chunks processed: {self.chunk_count}")
+        if self.flow_times:
+            lines.append(f"  Avg flow (CFM) time: {sum(self.flow_times) / len(self.flow_times):.1f}ms")
+        if self.hifigan_times:
+            lines.append(f"  Avg HiFiGAN time: {sum(self.hifigan_times) / len(self.hifigan_times):.1f}ms")
+        if self.flow_times and self.hifigan_times:
+            avg_total = (sum(self.flow_times) + sum(self.hifigan_times)) / len(self.flow_times)
+            lines.append(f"  Avg total vocode time: {avg_total:.1f}ms")
+
+        lines.append("VocoderBatcher:")
+        if self.batch_sizes:
+            lines.append(f"  Avg batch size: {sum(self.batch_sizes) / len(self.batch_sizes):.1f}")
+        if self.batcher_wait_times:
+            lines.append(f"  Avg queue wait: {sum(self.batcher_wait_times) / len(self.batcher_wait_times):.1f}ms")
+
+        lines.append("Overall:")
+        if self.latency_to_first_chunk is not None:
+            lines.append(f"  Time to first chunk: {self.latency_to_first_chunk * 1000:.0f}ms")
+        if self.total_generation_time is not None:
+            lines.append(f"  Total generation time: {self.total_generation_time:.2f}s")
+        if self.total_audio_duration is not None:
+            lines.append(f"  Total audio duration: {self.total_audio_duration:.2f}s")
+        if self.rtf is not None:
+            lines.append(f"  RTF: {self.rtf:.2f}")
+        if self.chunk_latencies:
+            latencies_str = ", ".join(f"{l:.0f}" for l in self.chunk_latencies)
+            lines.append(f"  Chunk latencies (ms): [{latencies_str}]")
+
+        lines.append("===========================")
+        return "\n".join(lines)
+
 
 class VocoderBatcher:
     """Collects vocoding requests from concurrent streams and batches them.
@@ -105,11 +163,16 @@ class VocoderBatcher:
         speech_tokens: torch.Tensor,
         ref_dict: dict,
         n_timesteps: int = 10,
-    ) -> torch.Tensor:
-        """Submit a vocoding request and wait for the batched result."""
+    ) -> Tuple[torch.Tensor, dict]:
+        """Submit a vocoding request and wait for the batched result.
+
+        Returns:
+            Tuple of (audio waveform tensor, timing dict with wait_ms, batch_size, flow_ms, hifigan_ms).
+        """
         self._ensure_started()
         future = asyncio.get_event_loop().create_future()
-        await self._queue.put((speech_tokens, ref_dict, n_timesteps, future))
+        submit_time = time.monotonic()
+        await self._queue.put((speech_tokens, ref_dict, n_timesteps, future, submit_time))
         return await future
 
     async def _batch_worker(self):
@@ -152,24 +215,32 @@ class VocoderBatcher:
                         print(f"[VocoderBatcher] Batching {len(group)} requests together (same voice)")
 
                     try:
+                        batch_start = time.monotonic()
                         with torch.autocast("cuda", dtype=torch.bfloat16):
-                            results = self.s3gen.batch_inference(
+                            results, batch_timing = self.s3gen.batch_inference(
                                 speech_tokens_list=tokens_list,
                                 ref_dict=ref_dict,
                                 n_timesteps=n_timesteps,
                             )
-                        for (_, _, _, future), result in zip(group, results):
+                        for (_, _, _, future, submit_time), result in zip(group, results):
+                            wait_ms = (batch_start - submit_time) * 1000
+                            item_timing = {
+                                "wait_ms": wait_ms,
+                                "batch_size": len(group),
+                                "flow_ms": batch_timing["flow_ms"],
+                                "hifigan_ms": batch_timing["hifigan_ms"],
+                            }
                             if not future.done():
-                                future.set_result(result)
+                                future.set_result((result, item_timing))
                     except Exception as e:
-                        for _, _, _, future in group:
+                        for _, _, _, future, _ in group:
                             if not future.done():
                                 future.set_exception(e)
 
             except Exception as e:
                 # Don't let the worker die from unexpected errors
                 print(f"[VocoderBatcher] Worker error: {e}")
-                for _, _, _, future in batch:
+                for _, _, _, future, _ in batch:
                     if not future.done():
                         future.set_exception(e)
 
@@ -482,7 +553,7 @@ class ChatterboxTTS:
                     speech_tokens = speech_tokens[speech_tokens < 6561]
 
                     with torch.autocast("cuda", dtype=torch.bfloat16):
-                        wav, _ = self.s3gen.inference(
+                        wav, _, _timing = self.s3gen.inference(
                             speech_tokens=speech_tokens,
                             ref_dict=s3gen_ref,
                             n_timesteps=diffusion_steps,
@@ -520,7 +591,7 @@ class ChatterboxTTS:
             return None, 0.0, False
 
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            wav, _ = self.s3gen.inference(
+            wav, _, _timing = self.s3gen.inference(
                 speech_tokens=clean_tokens,
                 ref_dict=s3gen_ref,
                 n_timesteps=diffusion_steps,
@@ -582,11 +653,15 @@ class ChatterboxTTS:
 
         # Submit to batcher — suspends this coroutine, freeing event loop
         # for vLLM token generation and other requests' vocoding submissions
-        wav = await self.vocoder_batcher.vocode(
+        wav, vocode_timing = await self.vocoder_batcher.vocode(
             speech_tokens=clean_tokens,
             ref_dict=s3gen_ref,
             n_timesteps=diffusion_steps,
         )
+        metrics.flow_times.append(vocode_timing["flow_ms"])
+        metrics.hifigan_times.append(vocode_timing["hifigan_ms"])
+        metrics.batcher_wait_times.append(vocode_timing["wait_ms"])
+        metrics.batch_sizes.append(vocode_timing["batch_size"])
         wav = wav.detach().cpu().numpy()
 
         # Post-processing (same as sync version)
@@ -722,17 +797,28 @@ class ChatterboxTTS:
 
         token_buffer: list[int] = []
         all_tokens_processed = torch.tensor([], dtype=torch.long, device=self.target_device)
+        t3_first_token_time = None
+        t3_token_count = 0
+        t3_last_token_time = None
 
         with torch.inference_mode():
             async for output in self.async_engine.generate(
                 prompt, sampling_params, request_id
             ):
                 for completion in output.outputs:
+                    n_new = len(completion.token_ids)
+                    if n_new > 0:
+                        now = time.time()
+                        t3_token_count += n_new
+                        t3_last_token_time = now
+                        if t3_first_token_time is None:
+                            t3_first_token_time = now
                     token_buffer.extend(completion.token_ids)
 
                 should_process = len(token_buffer) >= chunk_size or output.finished
 
                 if should_process and len(token_buffer) > 0:
+                    chunk_start = time.monotonic()
                     new_speech_tokens = torch.tensor(
                         [t - SPEECH_TOKEN_OFFSET for t in token_buffer],
                         device=self.target_device,
@@ -753,6 +839,8 @@ class ChatterboxTTS:
                         )
 
                         if success:
+                            chunk_elapsed_ms = (time.monotonic() - chunk_start) * 1000
+                            metrics.chunk_latencies.append(chunk_elapsed_ms)
                             total_audio_length += audio_duration
                             yield audio_tensor, metrics
 
@@ -762,14 +850,22 @@ class ChatterboxTTS:
 
             torch.cuda.empty_cache()
 
+        # Finalize T3 metrics
+        metrics.t3_tokens_generated = t3_token_count
+        if t3_first_token_time is not None:
+            metrics.t3_time_to_first_token = t3_first_token_time - start_time
+        if t3_last_token_time is not None and t3_first_token_time is not None:
+            t3_duration = t3_last_token_time - t3_first_token_time
+            metrics.t3_total_time = t3_duration
+            if t3_duration > 0:
+                metrics.t3_tokens_per_second = t3_token_count / t3_duration
+
         metrics.total_generation_time = time.time() - start_time
         metrics.total_audio_duration = total_audio_length
         if total_audio_length > 0:
             metrics.rtf = metrics.total_generation_time / total_audio_length
-            print(f"[Streaming] Total generation time: {metrics.total_generation_time:.3f}s")
-            print(f"[Streaming] Total audio duration: {metrics.total_audio_duration:.3f}s")
-            print(f"[Streaming] RTF: {metrics.rtf:.3f}")
-            print(f"[Streaming] Chunks yielded: {metrics.chunk_count}")
+
+        print(metrics.summary())
 
     def shutdown(self):
         del self.async_engine
