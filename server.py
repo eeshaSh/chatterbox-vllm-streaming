@@ -56,8 +56,8 @@ async def audio_stream(
     language_id: str = "en",
     exaggeration: float = 0.5,
     temperature: float = 0.5,
-    chunk_size: int = 10,
-    diffusion_steps: int = 4,
+    chunk_size: int = 15,
+    diffusion_steps: int = 5,
     output_format: str = "pcm",
 ):
     """Async generator that yields PCM bytes (or WAV with header) from streaming TTS."""
@@ -103,8 +103,8 @@ class SpeechRequest(BaseModel):
     language_id: str = "en"
     exaggeration: float = 0.5
     temperature: float = 0.5
-    chunk_size: int = 10
-    diffusion_steps: int = 4
+    chunk_size: int = 15
+    diffusion_steps: int = 5
 
 
 @app.post("/audio/speech")
@@ -141,8 +141,8 @@ async def tts_get(
     language_id: str = Query("en", description="Language code"),
     exaggeration: float = Query(0.5, description="Emotion exaggeration factor"),
     temperature: float = Query(0.5, description="Sampling temperature"),
-    chunk_size: int = Query(10, description="Tokens per streaming chunk"),
-    diffusion_steps: int = Query(4, description="S3Gen diffusion steps"),
+    chunk_size: int = Query(15, description="Tokens per streaming chunk"),
+    diffusion_steps: int = Query(5, description="S3Gen diffusion steps"),
     format: str = Query("wav", description="Output format: 'pcm' or 'wav'"),
 ):
     """Stream TTS audio as raw PCM or WAV."""
@@ -173,8 +173,8 @@ async def tts_post(
     language_id: str = Form("en"),
     exaggeration: float = Form(0.5),
     temperature: float = Form(0.5),
-    chunk_size: int = Form(10),
-    diffusion_steps: int = Form(4),
+    chunk_size: int = Form(15),
+    diffusion_steps: int = Form(5),
     format: str = Form("wav"),
 ):
     """Stream TTS audio. Voice cloning is automatic based on language_id."""
