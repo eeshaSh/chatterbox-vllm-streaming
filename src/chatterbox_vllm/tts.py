@@ -476,7 +476,7 @@ class ChatterboxTTS:
         # Number of diffusion steps to use for S3Gen
         # The original Chatterbox uses 10. 5 is often enough for good quality audio, though some quality loss can be detected.
         # This can be as low as 2 or 3 for faster generation, though the audio quality will degrade substantially.
-        diffusion_steps: int = 5,
+        diffusion_steps: int = 4,
 
         # From original Chatterbox HF generation args
         top_p=1.0,
@@ -573,7 +573,7 @@ class ChatterboxTTS:
         start_time: float,
         metrics: StreamingMetrics,
         fade_duration: float = 0.02,
-        diffusion_steps: int = 5,
+        diffusion_steps: int = 4,
     ) -> Tuple[Optional[torch.Tensor], float, bool]:
         """Convert a chunk of speech tokens to audio using context windowing for smooth boundaries."""
         # Include previous tokens as context so S3Gen can produce coherent audio at boundaries
@@ -634,7 +634,7 @@ class ChatterboxTTS:
         start_time: float,
         metrics: StreamingMetrics,
         fade_duration: float = 0.02,
-        diffusion_steps: int = 5,
+        diffusion_steps: int = 4,
     ) -> Tuple[Optional[torch.Tensor], float, bool]:
         """Async version of _process_token_buffer that routes S3Gen through the VocoderBatcher."""
         # Token prep (same as sync version)
@@ -697,10 +697,10 @@ class ChatterboxTTS:
         language_id: Optional[str] = 'en',
         exaggeration: float = 0.5,
         temperature: float = 0.8,
-        chunk_size: int = 15,
+        chunk_size: int = 10,
         context_window: int = 50,
         fade_duration: float = 0.02,
-        diffusion_steps: int = 5,
+        diffusion_steps: int = 4,
         max_tokens: int = 1000,
         top_p: float = 1.0,
         min_p: float = 0.05,
@@ -743,10 +743,10 @@ class ChatterboxTTS:
         language_id: Optional[str] = 'en',
         exaggeration: float = 0.5,
         temperature: float = 0.8,
-        chunk_size: int = 15,
+        chunk_size: int = 10,
         context_window: int = 50,
         fade_duration: float = 0.02,
-        diffusion_steps: int = 5,
+        diffusion_steps: int = 4,
         max_tokens: int = 1000,
         top_p: float = 1.0,
         min_p: float = 0.05,
