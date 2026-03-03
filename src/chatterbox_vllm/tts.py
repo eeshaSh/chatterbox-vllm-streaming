@@ -343,23 +343,29 @@ class ChatterboxTTS:
         # torch.compile the ConditionalDecoder (CFM estimator) — the inner loop
         # of the diffusion solver that accounts for ~94% of vocoding time.
         # Called n_timesteps times per chunk inside solve_euler().
+        # Using reduce-overhead mode for CUDA graph capture. The solve_euler()
+        # method pads mel lengths to fixed buckets so shapes are consistent.
         estimator = s3gen.flow.decoder.estimator
-        s3gen.flow.decoder.estimator = torch.compile(estimator, dynamic=True)
-        print("[torch.compile] Compiled ConditionalDecoder estimator")
+        s3gen.flow.decoder.estimator = torch.compile(
+            estimator, mode="reduce-overhead", fullgraph=False,
+        )
+        print("[torch.compile] Compiled ConditionalDecoder estimator (reduce-overhead)")
 
-        # Warmup: run a dummy forward pass to trigger compilation before first request.
-        # Typical streaming shape: 2*B=2 (CFG), mel_len~130 (65 tokens * 2 mel frames/token).
-        print("[torch.compile] Warming up compiled estimator...")
+        # Warmup: run dummy forward passes at each mel bucket size to trigger
+        # CUDA graph capture during startup rather than on the first request.
+        # Streaming mel lengths land in the 384 or 512 buckets.
+        print("[torch.compile] Warming up compiled estimator at bucket sizes...")
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            mel_len = 130
             B2 = 2  # CFG doubles batch
-            dummy_x = torch.randn(B2, 80, mel_len, device=target_device)
-            dummy_mask = torch.ones(B2, 1, mel_len, device=target_device)
-            dummy_mu = torch.randn(B2, 80, mel_len, device=target_device)
-            dummy_t = torch.rand(B2, device=target_device)
-            dummy_spks = torch.randn(B2, 80, device=target_device)
-            dummy_cond = torch.randn(B2, 80, mel_len, device=target_device)
-            _ = s3gen.flow.decoder.estimator(dummy_x, dummy_mask, dummy_mu, dummy_t, dummy_spks, dummy_cond)
+            for mel_len in [384, 512]:
+                dummy_x = torch.randn(B2, 80, mel_len, device=target_device)
+                dummy_mask = torch.ones(B2, 1, mel_len, device=target_device)
+                dummy_mu = torch.randn(B2, 80, mel_len, device=target_device)
+                dummy_t = torch.rand(B2, device=target_device)
+                dummy_spks = torch.randn(B2, 80, device=target_device)
+                dummy_cond = torch.randn(B2, 80, mel_len, device=target_device)
+                _ = s3gen.flow.decoder.estimator(dummy_x, dummy_mask, dummy_mu, dummy_t, dummy_spks, dummy_cond)
+                print(f"  Warmed up at mel_len={mel_len}")
         print("[torch.compile] Warmup complete")
 
         default_conds = Conditionals.load(ckpt_dir / "conds.pt")
