@@ -79,8 +79,8 @@ class ConditionalCFM(BASECFM):
             t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
         return self.solve_euler(z, t_span=t_span, mu=mu, mask=mask, spks=spks, cond=cond), flow_cache
 
-    # Mel length buckets for CUDA graph reuse with torch.compile reduce-overhead.
-    # Padding to fixed sizes ensures the compiled estimator sees the same shapes.
+    # Mel length buckets for torch.compile shape consistency.
+    # Padding to fixed sizes prevents recompilation on every new mel length.
     _MEL_BUCKETS = [384, 512, 768, 1024, 2048]
 
     def solve_euler(self, x, t_span, mu, mask, spks, cond):
@@ -109,7 +109,7 @@ class ConditionalCFM(BASECFM):
         orig_mel_len = x.size(2)
 
         # Pad mel dimension to a fixed bucket size so the compiled estimator
-        # sees consistent shapes, enabling CUDA graph reuse.
+        # sees consistent shapes, avoiding recompilation.
         pad_mel_len = orig_mel_len
         for b in self._MEL_BUCKETS:
             if orig_mel_len <= b:
@@ -120,7 +120,7 @@ class ConditionalCFM(BASECFM):
             pad_size = pad_mel_len - orig_mel_len
             x = F.pad(x, (0, pad_size))
             mu = F.pad(mu, (0, pad_size))
-            mask = F.pad(mask, (0, pad_size))      # padded positions get mask=0
+            mask = F.pad(mask, (0, pad_size))
             cond = F.pad(cond, (0, pad_size))
 
         # CFG doubles the batch: slots [:B] = conditioned, slots [B:] = unconditioned (zeroed)
@@ -157,7 +157,6 @@ class ConditionalCFM(BASECFM):
 
         result = sol[-1].float()
 
-        # Crop padding back to original mel length
         if pad_mel_len > orig_mel_len:
             result = result[:, :, :orig_mel_len]
 

@@ -340,20 +340,16 @@ class ChatterboxTTS:
         s3gen.speaker_encoder.to(dtype=torch.bfloat16)
         s3gen.mel2wav.to(dtype=torch.bfloat16)
 
-        # torch.compile the ConditionalDecoder (CFM estimator) — the inner loop
-        # of the diffusion solver that accounts for ~94% of vocoding time.
-        # Called n_timesteps times per chunk inside solve_euler().
-        # Using reduce-overhead mode for CUDA graph capture. The solve_euler()
-        # method pads mel lengths to fixed buckets so shapes are consistent.
+        # torch.compile the ConditionalDecoder (CFM estimator) with default mode.
+        # Default mode uses Triton kernel fusion without CUDA graphs, so it
+        # won't conflict with vLLM's GPU memory management.
+        # The solve_euler() method pads mel lengths to fixed buckets so shapes
+        # are consistent and the compiled graph is reused without recompilation.
         estimator = s3gen.flow.decoder.estimator
-        s3gen.flow.decoder.estimator = torch.compile(
-            estimator, mode="reduce-overhead", fullgraph=False,
-        )
-        print("[torch.compile] Compiled ConditionalDecoder estimator (reduce-overhead)")
+        s3gen.flow.decoder.estimator = torch.compile(estimator)
+        print("[torch.compile] Compiled ConditionalDecoder estimator (default mode)")
 
-        # Warmup: run dummy forward passes at each mel bucket size to trigger
-        # CUDA graph capture during startup rather than on the first request.
-        # Streaming mel lengths land in the 384 or 512 buckets.
+        # Warmup: trigger compilation at common mel bucket sizes during startup.
         print("[torch.compile] Warming up compiled estimator at bucket sizes...")
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             B2 = 2  # CFG doubles batch
