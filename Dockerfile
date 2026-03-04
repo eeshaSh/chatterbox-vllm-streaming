@@ -37,9 +37,11 @@ RUN uv pip install tensorrt==10.7.0 --extra-index-url https://pypi.nvidia.com
 COPY t3-model/ t3-model/
 COPY t3-model-multilingual/ t3-model-multilingual/
 
-# Copy source code and voice clone files
+# Copy source code, scripts, and voice clone files
 COPY src/ src/
+COPY scripts/ scripts/
 COPY server.py .
+COPY entrypoint.sh .
 COPY voice_clone_wavs/ voice_clone_wavs/
 
 # Install the project itself
@@ -49,4 +51,4 @@ ENV VLLM_USE_V1=0
 
 EXPOSE 4123
 
-CMD ["uv", "run", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "4123"]
+ENTRYPOINT ["/app/entrypoint.sh"]
