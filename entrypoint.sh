@@ -10,13 +10,23 @@ CKPT_DIR="${HF_HOME:-${HOME}/.cache/huggingface}/hub"
 if [ "${SKIP_TRT_BUILD:-0}" = "1" ]; then
     echo "[TRT] Skipping TRT engine build (SKIP_TRT_BUILD=1)"
 else
-    # Find s3gen.safetensors in the HF cache
-    S3GEN_PATH=$(find "$CKPT_DIR" -name "s3gen.safetensors" -type f 2>/dev/null | head -1)
+    # Download s3gen.safetensors if not already cached
+    echo "[TRT] Ensuring s3gen.safetensors is downloaded..."
+    uv run python -c "
+from huggingface_hub import hf_hub_download
+path = hf_hub_download(
+    repo_id='ResembleAI/chatterbox',
+    filename='s3gen.safetensors',
+    revision='05e904af2b5c7f8e482687a9d7336c5c824467d9',
+)
+print(path)
+" > /tmp/s3gen_path.txt
 
-    if [ -z "$S3GEN_PATH" ]; then
-        echo "[TRT] s3gen.safetensors not found yet — model will be downloaded at server start."
-        echo "[TRT] Skipping TRT build; will use PyTorch eager mode this run."
-        echo "[TRT] Re-run the container after model download to build the TRT engine."
+    S3GEN_PATH=$(cat /tmp/s3gen_path.txt | tail -1)
+    rm -f /tmp/s3gen_path.txt
+
+    if [ -z "$S3GEN_PATH" ] || [ ! -f "$S3GEN_PATH" ]; then
+        echo "[TRT] Failed to download s3gen.safetensors, skipping TRT build"
     else
         S3GEN_DIR=$(dirname "$S3GEN_PATH")
         ENGINE_PATH="${S3GEN_DIR}/conditional_decoder.engine"
