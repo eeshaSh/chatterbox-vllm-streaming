@@ -348,7 +348,9 @@ class ChatterboxTTS:
             runtime = trt.Runtime(trt_logger)
             with open(trt_engine_path, "rb") as f:
                 engine = runtime.deserialize_cuda_engine(f.read())
-            s3gen.flow.decoder.estimator = engine.create_execution_context()
+            # Use object.__setattr__ to bypass nn.Module's type check,
+            # which rejects non-Module assignments to registered submodules.
+            object.__setattr__(s3gen.flow.decoder, "estimator", engine.create_execution_context())
             print(f"[TRT] Loaded TRT engine from {trt_engine_path}")
 
         default_conds = Conditionals.load(ckpt_dir / "conds.pt")
