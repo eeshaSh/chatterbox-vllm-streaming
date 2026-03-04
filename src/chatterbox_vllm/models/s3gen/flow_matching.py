@@ -141,23 +141,32 @@ class ConditionalCFM(BASECFM):
         if isinstance(self.estimator, torch.nn.Module):
             return self.estimator.forward(x, mask, mu, t, spks, cond)
         else:
+            orig_dtype = x.dtype
             B2 = x.size(0)  # 2*B for CFG
+            T = x.size(2)
+            # TRT engine expects float16 (not bfloat16)
+            x_f = x.contiguous().half()
+            mask_f = mask.contiguous().half()
+            mu_f = mu.contiguous().half()
+            t_f = t.contiguous().half()
+            spks_f = spks.contiguous().half()
+            cond_f = cond.contiguous().half()
+            out_f = torch.empty(B2, 80, T, device=x.device, dtype=torch.float16)
             with self.lock:
-                self.estimator.set_input_shape('x', (B2, 80, x.size(2)))
-                self.estimator.set_input_shape('mask', (B2, 1, x.size(2)))
-                self.estimator.set_input_shape('mu', (B2, 80, x.size(2)))
+                self.estimator.set_input_shape('x', (B2, 80, T))
+                self.estimator.set_input_shape('mask', (B2, 1, T))
+                self.estimator.set_input_shape('mu', (B2, 80, T))
                 self.estimator.set_input_shape('t', (B2,))
                 self.estimator.set_input_shape('spks', (B2, 80))
-                self.estimator.set_input_shape('cond', (B2, 80, x.size(2)))
-                # run trt engine
-                self.estimator.execute_v2([x.contiguous().data_ptr(),
-                                           mask.contiguous().data_ptr(),
-                                           mu.contiguous().data_ptr(),
-                                           t.contiguous().data_ptr(),
-                                           spks.contiguous().data_ptr(),
-                                           cond.contiguous().data_ptr(),
-                                           x.data_ptr()])
-            return x
+                self.estimator.set_input_shape('cond', (B2, 80, T))
+                self.estimator.execute_v2([x_f.data_ptr(),
+                                           mask_f.data_ptr(),
+                                           mu_f.data_ptr(),
+                                           t_f.data_ptr(),
+                                           spks_f.data_ptr(),
+                                           cond_f.data_ptr(),
+                                           out_f.data_ptr()])
+            return out_f.to(orig_dtype)
 
     def compute_loss(self, x1, mask, mu, spks=None, cond=None):
         """Computes diffusion loss
