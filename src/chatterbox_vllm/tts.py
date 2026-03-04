@@ -340,29 +340,16 @@ class ChatterboxTTS:
         s3gen.speaker_encoder.to(dtype=torch.bfloat16)
         s3gen.mel2wav.to(dtype=torch.bfloat16)
 
-        # torch.compile the ConditionalDecoder (CFM estimator) with default mode.
-        # Default mode uses Triton kernel fusion without CUDA graphs, so it
-        # won't conflict with vLLM's GPU memory management.
-        # The solve_euler() method pads mel lengths to fixed buckets so shapes
-        # are consistent and the compiled graph is reused without recompilation.
-        estimator = s3gen.flow.decoder.estimator
-        s3gen.flow.decoder.estimator = torch.compile(estimator)
-        print("[torch.compile] Compiled ConditionalDecoder estimator (default mode)")
-
-        # Warmup: trigger compilation at common mel bucket sizes during startup.
-        print("[torch.compile] Warming up compiled estimator at bucket sizes...")
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            B2 = 2  # CFG doubles batch
-            for mel_len in [384, 512]:
-                dummy_x = torch.randn(B2, 80, mel_len, device=target_device)
-                dummy_mask = torch.ones(B2, 1, mel_len, device=target_device)
-                dummy_mu = torch.randn(B2, 80, mel_len, device=target_device)
-                dummy_t = torch.rand(B2, device=target_device)
-                dummy_spks = torch.randn(B2, 80, device=target_device)
-                dummy_cond = torch.randn(B2, 80, mel_len, device=target_device)
-                _ = s3gen.flow.decoder.estimator(dummy_x, dummy_mask, dummy_mu, dummy_t, dummy_spks, dummy_cond)
-                print(f"  Warmed up at mel_len={mel_len}")
-        print("[torch.compile] Warmup complete")
+        # Load TensorRT engine for the CFM estimator if available
+        trt_engine_path = ckpt_dir / "conditional_decoder.engine"
+        if trt_engine_path.exists():
+            import tensorrt as trt
+            trt_logger = trt.Logger(trt.Logger.WARNING)
+            runtime = trt.Runtime(trt_logger)
+            with open(trt_engine_path, "rb") as f:
+                engine = runtime.deserialize_cuda_engine(f.read())
+            s3gen.flow.decoder.estimator = engine.create_execution_context()
+            print(f"[TRT] Loaded TRT engine from {trt_engine_path}")
 
         default_conds = Conditionals.load(ckpt_dir / "conds.pt")
         default_conds.to(device=target_device)

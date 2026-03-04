@@ -79,10 +79,6 @@ class ConditionalCFM(BASECFM):
             t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
         return self.solve_euler(z, t_span=t_span, mu=mu, mask=mask, spks=spks, cond=cond), flow_cache
 
-    # Mel length buckets for torch.compile shape consistency.
-    # Padding to fixed sizes prevents recompilation on every new mel length.
-    _MEL_BUCKETS = [384, 512, 768, 1024, 2048]
-
     def solve_euler(self, x, t_span, mu, mask, spks, cond):
         """
         Fixed euler solver for ODEs.
@@ -106,22 +102,6 @@ class ConditionalCFM(BASECFM):
         sol = []
 
         B = x.size(0)
-        orig_mel_len = x.size(2)
-
-        # Pad mel dimension to a fixed bucket size so the compiled estimator
-        # sees consistent shapes, avoiding recompilation.
-        pad_mel_len = orig_mel_len
-        for b in self._MEL_BUCKETS:
-            if orig_mel_len <= b:
-                pad_mel_len = b
-                break
-
-        if pad_mel_len > orig_mel_len:
-            pad_size = pad_mel_len - orig_mel_len
-            x = F.pad(x, (0, pad_size))
-            mu = F.pad(mu, (0, pad_size))
-            mask = F.pad(mask, (0, pad_size))
-            cond = F.pad(cond, (0, pad_size))
 
         # CFG doubles the batch: slots [:B] = conditioned, slots [B:] = unconditioned (zeroed)
         x_in = torch.zeros([2 * B, 80, x.size(2)], device=x.device, dtype=x.dtype)
@@ -155,12 +135,7 @@ class ConditionalCFM(BASECFM):
             if step < len(t_span) - 1:
                 dt = t_span[step + 1] - t
 
-        result = sol[-1].float()
-
-        if pad_mel_len > orig_mel_len:
-            result = result[:, :, :orig_mel_len]
-
-        return result
+        return sol[-1].float()
 
     def forward_estimator(self, x, mask, mu, t, spks, cond):
         if isinstance(self.estimator, torch.nn.Module):

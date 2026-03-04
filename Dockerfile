@@ -30,6 +30,9 @@ COPY pyproject.toml uv.lock .latest-version.generated.txt ./
 # Install dependencies (cached unless pyproject.toml or uv.lock change)
 RUN uv sync --frozen --no-dev --no-install-project
 
+# Install TensorRT for accelerated CFM inference
+RUN uv pip install tensorrt==10.7.0 --extra-index-url https://pypi.nvidia.com
+
 # Copy model config directories (model.safetensors are downloaded at runtime)
 COPY t3-model/ t3-model/
 COPY t3-model-multilingual/ t3-model-multilingual/
