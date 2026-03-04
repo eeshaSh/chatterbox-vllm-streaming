@@ -144,12 +144,22 @@ class VocoderBatcher:
     = 2.8s of serialized vocoding to a single ~300ms batched call.
     """
 
+    # Short wait for single-user fast path (ms)
+    FAST_PATH_WAIT_MS = 2.0
+
     def __init__(self, s3gen: S3Gen, max_batch_size: int = 32, max_wait_ms: float = 50):
         self.s3gen = s3gen
         self.max_batch_size = max_batch_size
         self.max_wait_ms = max_wait_ms
         self._queue: asyncio.Queue = None  # Initialized lazily per event loop
         self._worker_task: asyncio.Task = None
+        # Observability counters
+        self._total_batches = 0
+        self._timeout_fires = 0
+        self._early_fires = 0
+        self._fast_path_fires = 0
+        self._batch_size_history: list[int] = []
+        self._wait_time_history: list[float] = []
 
     def _ensure_started(self):
         """Start the batch worker if not already running."""
@@ -157,6 +167,23 @@ class VocoderBatcher:
         if self._queue is None or self._worker_task is None or self._worker_task.done():
             self._queue = asyncio.Queue()
             self._worker_task = loop.create_task(self._batch_worker())
+
+    def get_stats(self) -> dict:
+        """Return batcher observability metrics."""
+        return {
+            "total_batches": self._total_batches,
+            "timeout_fires": self._timeout_fires,
+            "early_fires": self._early_fires,
+            "fast_path_fires": self._fast_path_fires,
+            "avg_batch_size": (
+                sum(self._batch_size_history) / len(self._batch_size_history)
+                if self._batch_size_history else 0
+            ),
+            "avg_wait_ms": (
+                sum(self._wait_time_history) / len(self._wait_time_history)
+                if self._wait_time_history else 0
+            ),
+        }
 
     async def vocode(
         self,
@@ -179,29 +206,58 @@ class VocoderBatcher:
         """Background worker that collects and batches vocoder requests."""
         while True:
             batch = []
+            fire_reason = "timeout"
             try:
                 # Wait for at least one request
                 item = await self._queue.get()
                 batch.append(item)
 
-                # Collect more requests up to max_batch_size or timeout
-                deadline = time.monotonic() + self.max_wait_ms / 1000
-                while len(batch) < self.max_batch_size:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
-                    try:
-                        item = await asyncio.wait_for(
-                            self._queue.get(), timeout=remaining
-                        )
-                        batch.append(item)
-                    except asyncio.TimeoutError:
-                        break
+                # Single-user fast path: if nothing else arrives within 2ms,
+                # skip the full timeout and process immediately
+                try:
+                    item = await asyncio.wait_for(
+                        self._queue.get(),
+                        timeout=self.FAST_PATH_WAIT_MS / 1000,
+                    )
+                    batch.append(item)
+                except asyncio.TimeoutError:
+                    # Nothing arrived in 2ms — likely single user, fire immediately
+                    fire_reason = "fast_path"
 
-                # Group items by ref_dict so different voices don't get mixed
+                if fire_reason != "fast_path":
+                    # More requests are coming — use full timeout to collect a batch
+                    deadline = time.monotonic() + self.max_wait_ms / 1000
+                    early_fire_threshold = int(self.max_batch_size * 0.8)
+                    while len(batch) < self.max_batch_size:
+                        # Adaptive early fire at 80% capacity
+                        if len(batch) >= early_fire_threshold:
+                            fire_reason = "early"
+                            break
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        try:
+                            item = await asyncio.wait_for(
+                                self._queue.get(), timeout=remaining
+                            )
+                            batch.append(item)
+                        except asyncio.TimeoutError:
+                            break
+
+                # Update observability counters
+                self._total_batches += 1
+                self._batch_size_history.append(len(batch))
+                if fire_reason == "timeout":
+                    self._timeout_fires += 1
+                elif fire_reason == "early":
+                    self._early_fires += 1
+                else:
+                    self._fast_path_fires += 1
+
+                # Group items by speaker embedding, not object identity
                 groups: dict[int, list] = {}
                 for item in batch:
-                    key = id(item[1])  # group by ref_dict object identity
+                    key = item[1]['embedding'].data_ptr()
                     if key not in groups:
                         groups[key] = []
                     groups[key].append(item)
@@ -224,6 +280,7 @@ class VocoderBatcher:
                             )
                         for (_, _, _, future, submit_time), result in zip(group, results):
                             wait_ms = (batch_start - submit_time) * 1000
+                            self._wait_time_history.append(wait_ms)
                             item_timing = {
                                 "wait_ms": wait_ms,
                                 "batch_size": len(group),
