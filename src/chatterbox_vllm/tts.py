@@ -190,6 +190,7 @@ class VocoderBatcher:
         speech_tokens: torch.Tensor,
         ref_dict: dict,
         n_timesteps: int = 10,
+        finalize: bool = True,
     ) -> Tuple[torch.Tensor, dict]:
         """Submit a vocoding request and wait for the batched result.
 
@@ -199,7 +200,7 @@ class VocoderBatcher:
         self._ensure_started()
         future = asyncio.get_event_loop().create_future()
         submit_time = time.monotonic()
-        await self._queue.put((speech_tokens, ref_dict, n_timesteps, future, submit_time))
+        await self._queue.put((speech_tokens, ref_dict, n_timesteps, finalize, future, submit_time))
         return await future
 
     async def _batch_worker(self):
@@ -266,6 +267,8 @@ class VocoderBatcher:
                     tokens_list = [item[0] for item in group]
                     ref_dict = group[0][1]
                     n_timesteps = group[0][2]
+                    # finalize=True if ANY item in the group is final
+                    finalize = any(item[3] for item in group)
 
                     if len(group) > 1:
                         print(f"[VocoderBatcher] Batching {len(group)} requests together (same voice)")
@@ -277,8 +280,9 @@ class VocoderBatcher:
                                 speech_tokens_list=tokens_list,
                                 ref_dict=ref_dict,
                                 n_timesteps=n_timesteps,
+                                finalize=finalize,
                             )
-                        for (_, _, _, future, submit_time), result in zip(group, results):
+                        for (_, _, _, _, future, submit_time), result in zip(group, results):
                             wait_ms = (batch_start - submit_time) * 1000
                             self._wait_time_history.append(wait_ms)
                             item_timing = {
@@ -290,14 +294,14 @@ class VocoderBatcher:
                             if not future.done():
                                 future.set_result((result, item_timing))
                     except Exception as e:
-                        for _, _, _, future, _ in group:
+                        for _, _, _, _, future, _ in group:
                             if not future.done():
                                 future.set_exception(e)
 
             except Exception as e:
                 # Don't let the worker die from unexpected errors
                 print(f"[VocoderBatcher] Worker error: {e}")
-                for _, _, _, future, _ in batch:
+                for _, _, _, _, future, _ in batch:
                     if not future.done():
                         future.set_exception(e)
 
@@ -704,6 +708,7 @@ class ChatterboxTTS:
         metrics: StreamingMetrics,
         fade_duration: float = 0.02,
         diffusion_steps: int = 5,
+        finalize: bool = True,
     ) -> Tuple[Optional[torch.Tensor], float, bool]:
         """Async version of _process_token_buffer that routes S3Gen through the VocoderBatcher."""
         # Token prep (same as sync version)
@@ -726,6 +731,7 @@ class ChatterboxTTS:
             speech_tokens=clean_tokens,
             ref_dict=s3gen_ref,
             n_timesteps=diffusion_steps,
+            finalize=finalize,
         )
         metrics.flow_times.append(vocode_timing["flow_ms"])
         metrics.hifigan_times.append(vocode_timing["hifigan_ms"])
@@ -905,6 +911,7 @@ class ChatterboxTTS:
                             metrics,
                             fade_duration,
                             diffusion_steps,
+                            finalize=output.finished,
                         )
 
                         if success:
