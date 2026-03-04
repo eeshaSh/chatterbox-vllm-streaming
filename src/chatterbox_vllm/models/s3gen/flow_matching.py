@@ -144,14 +144,14 @@ class ConditionalCFM(BASECFM):
             orig_dtype = x.dtype
             B2 = x.size(0)  # 2*B for CFG
             T = x.size(2)
-            # TRT engine expects float16 (not bfloat16)
-            x_f = x.contiguous().half()
-            mask_f = mask.contiguous().half()
-            mu_f = mu.contiguous().half()
-            t_f = t.contiguous().half()
-            spks_f = spks.contiguous().half()
-            cond_f = cond.contiguous().half()
-            out_f = torch.empty(B2, 80, T, device=x.device, dtype=torch.float16)
+            # TRT engine bindings are float32 (FP16 flag only affects internal computation)
+            x_f = x.contiguous().float()
+            mask_f = mask.contiguous().float()
+            mu_f = mu.contiguous().float()
+            t_f = t.contiguous().float()
+            spks_f = spks.contiguous().float()
+            cond_f = cond.contiguous().float()
+            out_f = torch.empty(B2, 80, T, device=x.device, dtype=torch.float32)
             with self.lock:
                 self.estimator.set_input_shape('x', (B2, 80, T))
                 self.estimator.set_input_shape('mask', (B2, 1, T))
