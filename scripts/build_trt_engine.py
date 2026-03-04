@@ -105,7 +105,8 @@ def build_engine(onnx_path: str, output_path: str, fp16: bool = True,
         f.write(serialized_engine)
 
     # Print engine size
-    size_mb = len(serialized_engine) / (1024 * 1024)
+    import os
+    size_mb = os.path.getsize(output_path) / (1024 * 1024)
     print(f"Engine size: {size_mb:.1f} MB")
     print("Done!")
 
