@@ -102,6 +102,7 @@ class ConditionalCFM(BASECFM):
         sol = []
 
         B = x.size(0)
+
         # CFG doubles the batch: slots [:B] = conditioned, slots [B:] = unconditioned (zeroed)
         x_in = torch.zeros([2 * B, 80, x.size(2)], device=x.device, dtype=x.dtype)
         mask_in = torch.zeros([2 * B, 1, x.size(2)], device=x.device, dtype=x.dtype)
@@ -140,23 +141,32 @@ class ConditionalCFM(BASECFM):
         if isinstance(self.estimator, torch.nn.Module):
             return self.estimator.forward(x, mask, mu, t, spks, cond)
         else:
+            orig_dtype = x.dtype
             B2 = x.size(0)  # 2*B for CFG
+            T = x.size(2)
+            # TRT engine bindings are float32 (FP16 flag only affects internal computation)
+            x_f = x.contiguous().float()
+            mask_f = mask.contiguous().float()
+            mu_f = mu.contiguous().float()
+            t_f = t.contiguous().float()
+            spks_f = spks.contiguous().float()
+            cond_f = cond.contiguous().float()
+            out_f = torch.empty(B2, 80, T, device=x.device, dtype=torch.float32)
             with self.lock:
-                self.estimator.set_input_shape('x', (B2, 80, x.size(2)))
-                self.estimator.set_input_shape('mask', (B2, 1, x.size(2)))
-                self.estimator.set_input_shape('mu', (B2, 80, x.size(2)))
+                self.estimator.set_input_shape('x', (B2, 80, T))
+                self.estimator.set_input_shape('mask', (B2, 1, T))
+                self.estimator.set_input_shape('mu', (B2, 80, T))
                 self.estimator.set_input_shape('t', (B2,))
                 self.estimator.set_input_shape('spks', (B2, 80))
-                self.estimator.set_input_shape('cond', (B2, 80, x.size(2)))
-                # run trt engine
-                self.estimator.execute_v2([x.contiguous().data_ptr(),
-                                           mask.contiguous().data_ptr(),
-                                           mu.contiguous().data_ptr(),
-                                           t.contiguous().data_ptr(),
-                                           spks.contiguous().data_ptr(),
-                                           cond.contiguous().data_ptr(),
-                                           x.data_ptr()])
-            return x
+                self.estimator.set_input_shape('cond', (B2, 80, T))
+                self.estimator.execute_v2([x_f.data_ptr(),
+                                           mask_f.data_ptr(),
+                                           mu_f.data_ptr(),
+                                           t_f.data_ptr(),
+                                           spks_f.data_ptr(),
+                                           cond_f.data_ptr(),
+                                           out_f.data_ptr()])
+            return out_f.to(orig_dtype)
 
     def compute_loss(self, x1, mask, mu, spks=None, cond=None):
         """Computes diffusion loss
