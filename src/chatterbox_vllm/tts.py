@@ -653,7 +653,10 @@ class ChatterboxTTS:
         if len(all_tokens_so_far) > 0:
             context_tokens = all_tokens_so_far[-context_window:]
             tokens_to_process = torch.cat([context_tokens, new_tokens], dim=-1)
-            context_length = len(context_tokens)
+            # Count how many context tokens survive filtering
+            clean_context = drop_invalid_tokens(context_tokens.to(self.target_device))
+            clean_context = clean_context[clean_context < 6561]
+            context_length = len(clean_context)
         else:
             tokens_to_process = new_tokens
             context_length = 0
@@ -715,7 +718,10 @@ class ChatterboxTTS:
         if len(all_tokens_so_far) > 0:
             context_tokens = all_tokens_so_far[-context_window:]
             tokens_to_process = torch.cat([context_tokens, new_tokens], dim=-1)
-            context_length = len(context_tokens)
+            # Count how many context tokens survive filtering
+            clean_context = drop_invalid_tokens(context_tokens.to(self.target_device))
+            clean_context = clean_context[clean_context < 6561]
+            context_length = len(clean_context)
         else:
             tokens_to_process = new_tokens
             context_length = 0
