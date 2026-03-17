@@ -27,6 +27,14 @@ from .models.t3 import SPEECH_TOKEN_OFFSET
 from .models.t3.modules.cond_enc import T3Cond, T3CondEnc
 from .models.t3.modules.learned_pos_emb import LearnedPositionEmbeddings
 from .text_utils import punc_norm, SUPPORTED_LANGUAGES
+from .metrics import (
+    T3_TOKENS_GENERATED,
+    T3_TIME_TO_FIRST_TOKEN,
+    T3_TOKENS_PER_SECOND,
+    VOCODING_FLOW_DURATION,
+    VOCODING_HIFIGAN_DURATION,
+    VOCODING_CHUNK_LATENCY,
+)
 
 
 REPO_ID = "ResembleAI/chatterbox"
@@ -743,6 +751,8 @@ class ChatterboxTTS:
         metrics.hifigan_times.append(vocode_timing["hifigan_ms"])
         metrics.batcher_wait_times.append(vocode_timing["wait_ms"])
         metrics.batch_sizes.append(vocode_timing["batch_size"])
+        VOCODING_FLOW_DURATION.observe(vocode_timing["flow_ms"] / 1000.0)
+        VOCODING_HIFIGAN_DURATION.observe(vocode_timing["hifigan_ms"] / 1000.0)
         wav = wav.detach().cpu().numpy()
 
         # Post-processing (same as sync version)
@@ -923,6 +933,7 @@ class ChatterboxTTS:
                         if success:
                             chunk_elapsed_ms = (time.monotonic() - chunk_start) * 1000
                             metrics.chunk_latencies.append(chunk_elapsed_ms)
+                            VOCODING_CHUNK_LATENCY.observe(chunk_elapsed_ms / 1000.0)
                             total_audio_length += audio_duration
                             yield audio_tensor, metrics
 
@@ -941,6 +952,13 @@ class ChatterboxTTS:
             metrics.t3_total_time = t3_duration
             if t3_duration > 0:
                 metrics.t3_tokens_per_second = t3_token_count / t3_duration
+
+        # Prometheus T3 metrics
+        T3_TOKENS_GENERATED.inc(t3_token_count)
+        if metrics.t3_time_to_first_token is not None:
+            T3_TIME_TO_FIRST_TOKEN.observe(metrics.t3_time_to_first_token)
+        if metrics.t3_tokens_per_second is not None:
+            T3_TOKENS_PER_SECOND.observe(metrics.t3_tokens_per_second)
 
         metrics.total_generation_time = time.time() - start_time
         metrics.total_audio_duration = total_audio_length

@@ -3,7 +3,15 @@ import time
 import numpy as np
 from fastapi import FastAPI, Query, Form
 from fastapi.responses import StreamingResponse, JSONResponse
+from prometheus_client import make_asgi_app
 from chatterbox_vllm.tts import ChatterboxTTS
+from chatterbox_vllm.metrics import (
+    ACTIVE_REQUESTS,
+    REQUEST_COUNT,
+    REQUEST_DURATION,
+    TTFB_HISTOGRAM,
+    register_batcher_collector,
+)
 from typing import Optional
 from pathlib import Path
 from pydantic import BaseModel
@@ -23,6 +31,11 @@ VOICE_CLONE_MAP: dict[str, Path] = {
 print("Loading multilingual model on cuda...")
 model = ChatterboxTTS.from_pretrained_multilingual()
 print("Model loaded.")
+
+# Prometheus /metrics endpoint
+metrics_app = make_asgi_app()
+app.mount("/metrics", metrics_app)
+register_batcher_collector(lambda: model.vocoder_batcher)
 
 SAMPLE_RATE = model.sr  # 24000
 NUM_CHANNELS = 1
@@ -66,6 +79,9 @@ async def audio_stream(
     request_start = time.time()
     first_audio_sent = False
     chunk_count = 0
+    status = "success"
+
+    ACTIVE_REQUESTS.inc()
 
     # Resolve voice clone file from language, if one is mapped
     audio_prompt_path = None
@@ -73,31 +89,39 @@ async def audio_stream(
     if voice_file is not None:
         audio_prompt_path = str(voice_file)
 
-    if output_format == "wav":
-        yield make_wav_header(SAMPLE_RATE, NUM_CHANNELS, SAMPLE_WIDTH * 8)
+    try:
+        if output_format == "wav":
+            yield make_wav_header(SAMPLE_RATE, NUM_CHANNELS, SAMPLE_WIDTH * 8)
 
-    async for audio_chunk, metrics in model.generate_stream(
-        text=text,
-        audio_prompt_path=audio_prompt_path,
-        language_id=language_id,
-        exaggeration=exaggeration,
-        temperature=temperature,
-        chunk_size=chunk_size,
-        diffusion_steps=diffusion_steps,
-    ):
-        audio_np = audio_chunk.squeeze().cpu().numpy()
-        audio_np = np.nan_to_num(audio_np, nan=0.0, posinf=0.0, neginf=0.0)
-        audio_np = np.clip(audio_np, -1.0, 1.0)
-        pcm_data = (audio_np * np.iinfo(np.int16).max).astype("<i2", copy=False).tobytes()
-        if not first_audio_sent:
-            ttfb = time.time() - request_start
-            print(f"[Server] TTFB (request → first audio byte): {ttfb:.3f}s")
-            first_audio_sent = True
-        chunk_count += 1
-        yield pcm_data
-
-    total_time = time.time() - request_start
-    print(f"[Server] Request complete: {chunk_count} chunks in {total_time:.2f}s")
+        async for audio_chunk, metrics in model.generate_stream(
+            text=text,
+            audio_prompt_path=audio_prompt_path,
+            language_id=language_id,
+            exaggeration=exaggeration,
+            temperature=temperature,
+            chunk_size=chunk_size,
+            diffusion_steps=diffusion_steps,
+        ):
+            audio_np = audio_chunk.squeeze().cpu().numpy()
+            audio_np = np.nan_to_num(audio_np, nan=0.0, posinf=0.0, neginf=0.0)
+            audio_np = np.clip(audio_np, -1.0, 1.0)
+            pcm_data = (audio_np * np.iinfo(np.int16).max).astype("<i2", copy=False).tobytes()
+            if not first_audio_sent:
+                ttfb = time.time() - request_start
+                print(f"[Server] TTFB (request → first audio byte): {ttfb:.3f}s")
+                TTFB_HISTOGRAM.observe(ttfb)
+                first_audio_sent = True
+            chunk_count += 1
+            yield pcm_data
+    except Exception:
+        status = "error"
+        raise
+    finally:
+        total_time = time.time() - request_start
+        print(f"[Server] Request complete: {chunk_count} chunks in {total_time:.2f}s")
+        ACTIVE_REQUESTS.dec()
+        REQUEST_COUNT.labels(status=status).inc()
+        REQUEST_DURATION.observe(total_time)
 
 
 class SpeechRequest(BaseModel):
