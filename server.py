@@ -65,6 +65,7 @@ async def audio_stream(
     """Async generator that yields PCM bytes (or WAV with header) from streaming TTS."""
     request_start = time.time()
     first_audio_sent = False
+    chunk_count = 0
 
     # Resolve voice clone file from language, if one is mapped
     audio_prompt_path = None
@@ -85,12 +86,18 @@ async def audio_stream(
         diffusion_steps=diffusion_steps,
     ):
         audio_np = audio_chunk.squeeze().cpu().numpy()
-        pcm_data = (audio_np * 32767).astype(np.int16).tobytes()
+        audio_np = np.nan_to_num(audio_np, nan=0.0, posinf=0.0, neginf=0.0)
+        audio_np = np.clip(audio_np, -1.0, 1.0)
+        pcm_data = (audio_np * np.iinfo(np.int16).max).astype("<i2", copy=False).tobytes()
         if not first_audio_sent:
             ttfb = time.time() - request_start
             print(f"[Server] TTFB (request → first audio byte): {ttfb:.3f}s")
             first_audio_sent = True
+        chunk_count += 1
         yield pcm_data
+
+    total_time = time.time() - request_start
+    print(f"[Server] Request complete: {chunk_count} chunks in {total_time:.2f}s")
 
 
 class SpeechRequest(BaseModel):

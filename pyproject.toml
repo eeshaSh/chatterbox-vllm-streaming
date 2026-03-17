@@ -33,6 +33,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["build", "twine"]
+trt = ["tensorrt>=10.0", "onnx>=1.14"]
 
 [tool.setuptools.dynamic]
 version = { file = ".latest-version.generated.txt" }
