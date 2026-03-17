@@ -148,14 +148,14 @@ class VocoderBatcher:
     collects pending requests into a batch and runs a single batched S3Gen
     call, amortizing GPU kernel launch overhead across all items.
 
-    With 10 concurrent requests and batch_size=10, this reduces 10 × 280ms
-    = 2.8s of serialized vocoding to a single ~300ms batched call.
+    With 20 concurrent requests and batch_size=20, this reduces 20 × 280ms
+    = 5.6s of serialized vocoding to a single ~350ms batched call.
     """
 
     # Short wait for single-user fast path (ms)
     FAST_PATH_WAIT_MS = 2.0
 
-    def __init__(self, s3gen: S3Gen, max_batch_size: int = 32, max_wait_ms: float = 50):
+    def __init__(self, s3gen: S3Gen, max_batch_size: int = 20, max_wait_ms: float = 50):
         self.s3gen = s3gen
         self.max_batch_size = max_batch_size
         self.max_wait_ms = max_wait_ms

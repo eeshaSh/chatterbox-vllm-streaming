@@ -27,7 +27,7 @@ def get_gpu_info() -> str:
 
 
 def build_engine(onnx_path: str, output_path: str, fp16: bool = True,
-                 batch_min: int = 2, batch_opt: int = 2, batch_max: int = 20,
+                 batch_min: int = 2, batch_opt: int = 2, batch_max: int = 40,
                  time_min: int = 100, time_opt: int = 400, time_max: int = 800):
     logger = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(logger)
@@ -123,8 +123,8 @@ def main():
                         help="Minimum batch size (default: 2, for CFG doubling)")
     parser.add_argument("--batch-opt", type=int, default=2,
                         help="Optimal batch size (default: 2)")
-    parser.add_argument("--batch-max", type=int, default=20,
-                        help="Maximum batch size (default: 20, 2 x max_batch_size=10)")
+    parser.add_argument("--batch-max", type=int, default=40,
+                        help="Maximum batch size (default: 40, 2 x max_batch_size=20)")
     parser.add_argument("--time-min", type=int, default=100,
                         help="Minimum time dimension (default: 100)")
     parser.add_argument("--time-opt", type=int, default=400,
