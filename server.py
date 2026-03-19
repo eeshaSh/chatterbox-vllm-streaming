@@ -3,7 +3,8 @@ import time
 import numpy as np
 from fastapi import FastAPI, Query, Form
 from fastapi.responses import StreamingResponse, JSONResponse
-from prometheus_client import make_asgi_app
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from fastapi.responses import Response
 from chatterbox_vllm.tts import ChatterboxTTS
 from chatterbox_vllm.metrics import (
     ACTIVE_REQUESTS,
@@ -34,9 +35,11 @@ model = ChatterboxTTS.from_pretrained_multilingual()
 print("Model loaded.")
 
 # Prometheus /metrics endpoint
-metrics_app = make_asgi_app()
-app.mount("/metrics", metrics_app)
 register_batcher_collector(lambda: model.vocoder_batcher)
+
+@app.get("/metrics")
+async def metrics():
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 SAMPLE_RATE = model.sr  # 24000
 NUM_CHANNELS = 1

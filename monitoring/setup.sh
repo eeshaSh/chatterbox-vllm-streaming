@@ -7,6 +7,16 @@ PROMETHEUS_VERSION="3.2.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # -----------------------------------------------------------------------
+# Prompt for TTS server address
+# -----------------------------------------------------------------------
+TTS_TARGET="${1:-}"
+if [ -z "$TTS_TARGET" ]; then
+    read -rp "TTS server address [localhost:4123]: " TTS_TARGET
+    TTS_TARGET="${TTS_TARGET:-localhost:4123}"
+fi
+echo "Will scrape metrics from: ${TTS_TARGET}/metrics"
+
+# -----------------------------------------------------------------------
 # Detect architecture
 # -----------------------------------------------------------------------
 ARCH=$(uname -m)
@@ -40,10 +50,11 @@ install_prometheus() {
     # Create data directory
     mkdir -p /var/lib/prometheus
 
-    # Copy config
+    # Copy config, substituting the TTS target address
     mkdir -p /etc/prometheus
-    cp "${SCRIPT_DIR}/prometheus.yml" /etc/prometheus/prometheus.yml
-    echo "Prometheus config written to /etc/prometheus/prometheus.yml"
+    sed "s|TTS_TARGET_PLACEHOLDER|${TTS_TARGET}|g" \
+        "${SCRIPT_DIR}/prometheus.yml" > /etc/prometheus/prometheus.yml
+    echo "Prometheus config written to /etc/prometheus/prometheus.yml (target: ${TTS_TARGET})"
 
     # Create systemd service
     cat > /etc/systemd/system/prometheus.service << 'EOF'
