@@ -29,6 +29,7 @@ dependencies = [
     "gradio",
     "spacy-pkuseg",
     "pykakasi",
+    "prometheus-client",
 ]
 
 [project.optional-dependencies]
