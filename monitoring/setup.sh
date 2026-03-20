@@ -107,12 +107,31 @@ install_grafana() {
     mkdir -p /etc/grafana/provisioning/datasources
     cp "${SCRIPT_DIR}/grafana/provisioning/datasources/prometheus.yml" \
        /etc/grafana/provisioning/datasources/prometheus.yml
+    chown grafana:grafana /etc/grafana/provisioning/datasources/prometheus.yml
+    chmod 644 /etc/grafana/provisioning/datasources/prometheus.yml
     echo "Grafana datasource provisioned (Prometheus at localhost:9090)"
+
+    # Provision dashboard so it loads automatically
+    mkdir -p /etc/grafana/provisioning/dashboards
+    cp "${SCRIPT_DIR}/grafana/provisioning/dashboards/dashboards.yml" \
+       /etc/grafana/provisioning/dashboards/dashboards.yml
+    chown grafana:grafana /etc/grafana/provisioning/dashboards/dashboards.yml
+    chmod 644 /etc/grafana/provisioning/dashboards/dashboards.yml
+
+    mkdir -p /var/lib/grafana/dashboards
+    cp "${SCRIPT_DIR}/grafana/dashboard.json" \
+       /var/lib/grafana/dashboards/chatterbox-tts.json
+    chown grafana:grafana /var/lib/grafana/dashboards/chatterbox-tts.json
+    chmod 644 /var/lib/grafana/dashboards/chatterbox-tts.json
+    echo "Grafana dashboard provisioned (Chatterbox TTS)"
+
+    # Set Grafana to port 8000
+    sed -i 's/;http_port = 3000/http_port = 8000/' /etc/grafana/grafana.ini
 
     systemctl daemon-reload
     systemctl enable grafana-server
     systemctl start grafana-server
-    echo "Grafana service started on :3000 (login: admin / admin)"
+    echo "Grafana service started on :8000 (login: admin / admin)"
 }
 
 # -----------------------------------------------------------------------
@@ -134,7 +153,7 @@ echo ""
 echo "=== Setup complete ==="
 echo ""
 echo "  Prometheus:  http://localhost:9090"
-echo "  Grafana:     http://localhost:3000  (admin / admin)"
+echo "  Grafana:     http://localhost:8000  (admin / admin)"
 echo "  TTS metrics: http://localhost:4123/metrics"
 echo ""
 echo "Verify targets are being scraped:"
