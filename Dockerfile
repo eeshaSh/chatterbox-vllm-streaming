@@ -51,4 +51,7 @@ ENV VLLM_USE_V1=0
 
 EXPOSE 4123
 
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD curl -f http://localhost:4123/health || exit 1
+
 ENTRYPOINT ["/app/entrypoint.sh"]
