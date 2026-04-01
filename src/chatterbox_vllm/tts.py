@@ -645,6 +645,57 @@ class ChatterboxTTS:
 
             return results
         
+    @staticmethod
+    def _trim_trailing_silence(audio: np.ndarray, sr: int = 24000,
+                               frame_ms: int = 20, silence_threshold: float = 0.008,
+                               min_silence_ms: int = 200, fade_ms: int = 15) -> np.ndarray:
+        """Trim trailing non-speech audio from the final chunk.
+
+        After T3 emits its stop token, the last vocoded chunk often contains
+        junk audio (mid-freq artifacts, spurious bursts) past the actual speech.
+        This finds the last sustained speech region and trims everything after it,
+        with a short fade-out to avoid clicks.
+
+        Only call this on the final chunk (when finalize=True).
+        """
+        frame_size = int(frame_ms / 1000 * sr)
+        n_frames = len(audio) // frame_size
+        if n_frames == 0:
+            return audio
+
+        # Compute per-frame RMS
+        frame_rms = np.array([
+            np.sqrt(np.mean(audio[i * frame_size:(i + 1) * frame_size] ** 2))
+            for i in range(n_frames)
+        ])
+
+        # Find the last frame that's clearly speech (above threshold)
+        speech_frames = np.where(frame_rms > silence_threshold)[0]
+        if len(speech_frames) == 0:
+            return audio  # all silence — don't trim
+
+        last_speech_frame = speech_frames[-1]
+
+        # Add a short tail after the last speech frame (min_silence_ms)
+        tail_frames = int(min_silence_ms / frame_ms)
+        cut_frame = min(last_speech_frame + tail_frames, n_frames)
+        cut_sample = cut_frame * frame_size
+
+        if cut_sample >= len(audio):
+            return audio  # nothing to trim
+
+        # Apply a short fade-out at the cut point
+        fade_samples = min(int(fade_ms / 1000 * sr), cut_sample)
+        if fade_samples > 0:
+            fade_out = np.linspace(1.0, 0.0, fade_samples, dtype=audio.dtype)
+            audio[cut_sample - fade_samples:cut_sample] *= fade_out
+
+        trimmed = audio[:cut_sample]
+        trimmed_ms = (len(audio) - len(trimmed)) / sr * 1000
+        if trimmed_ms > 50:
+            print(f"[Trim] Removed {trimmed_ms:.0f}ms trailing audio from final chunk")
+        return trimmed
+
     def _process_token_buffer(
         self,
         new_tokens: torch.Tensor,
@@ -770,6 +821,14 @@ class ChatterboxTTS:
         if fade_samples > 0:
             fade_in = np.linspace(0.0, 1.0, fade_samples, dtype=audio_chunk.dtype)
             audio_chunk[:fade_samples] *= fade_in
+
+        # On the final chunk, trim trailing non-speech audio.
+        # T3 can generate junk tokens before EOS fires, which S3Gen vocodes
+        # into audible garbage after the actual speech has ended.
+        if finalize:
+            audio_chunk = self._trim_trailing_silence(audio_chunk, sr=self.sr)
+            if len(audio_chunk) == 0:
+                return None, 0.0, False
 
         audio_duration = len(audio_chunk) / self.sr
         audio_tensor = torch.from_numpy(audio_chunk).unsqueeze(0)
