@@ -233,6 +233,11 @@ class S3Token2Wav(S3Token2Mel):
     TODO: make these modules configurable?
     """
 
+    # Mel bins 0-11 correspond roughly to 0-300Hz (mel-scale, 80 bins, fmin=0, fmax=8000).
+    MEL_GATE_LOW_BINS = 12
+    MEL_GATE_SILENCE_THRESHOLD_DB = -6.0  # relative to median frame energy (in dB)
+    MEL_GATE_ATTENUATION = 0.05  # multiply low bins by this in silence frames
+
     def __init__(self, use_fp16: bool = False):
         super().__init__(use_fp16=use_fp16)
 
@@ -252,6 +257,40 @@ class S3Token2Wav(S3Token2Mel):
         trim_fade[n_trim:] = (torch.cos(torch.linspace(torch.pi, 0, n_trim)) + 1) / 2
         self.register_buffer("trim_fade", trim_fade, persistent=False) # (buffers get automatic device casting)
 
+    def _gate_mel_silence(self, mels: torch.Tensor) -> torch.Tensor:
+        """Attenuate low-frequency mel bins in silence/near-silence frames.
+
+        This suppresses the groan/creak artifacts (30-300Hz bursts) that the
+        vocoder produces at pause boundaries and after speech ends.
+
+        Args:
+            mels: Mel-spectrogram tensor of shape (B, 80, T).
+
+        Returns:
+            Gated mel-spectrogram (same shape, modified in-place).
+        """
+        # Per-frame energy: sum of squared mel values across all 80 bins
+        frame_energy = (mels ** 2).sum(dim=1)  # (B, T)
+
+        # Use median energy as reference for "normal" speech level
+        median_energy = frame_energy.median(dim=1, keepdim=True).values.clamp(min=1e-10)
+
+        # Threshold: frames with energy well below median are silence
+        threshold = median_energy * (10 ** (self.MEL_GATE_SILENCE_THRESHOLD_DB / 10))
+
+        # Build per-frame gain for low bins: 1.0 for speech, attenuation for silence
+        is_silence = frame_energy < threshold  # (B, T)
+
+        # Smooth transition: compute ratio and apply cubic smoothstep
+        ratio = (frame_energy / threshold).clamp(0, 1)  # 0=deep silence, 1=at threshold
+        smooth = ratio ** 2 * (3 - 2 * ratio)  # smoothstep
+        gain = self.MEL_GATE_ATTENUATION + smooth * (1.0 - self.MEL_GATE_ATTENUATION)
+
+        # Only apply to low-frequency bins (0-300Hz region)
+        mels[:, :self.MEL_GATE_LOW_BINS, :] *= gain.unsqueeze(1)
+
+        return mels
+
     def forward(
         self,
         speech_tokens,
@@ -263,6 +302,8 @@ class S3Token2Wav(S3Token2Mel):
         finalize: bool = False
     ):
         output_mels = super().forward(speech_tokens, ref_wav=ref_wav, ref_sr=ref_sr, ref_dict=ref_dict, finalize=finalize)
+
+        output_mels = self._gate_mel_silence(output_mels)
 
         # TODO jrm: ignoring the speed control (mel interpolation) and the HiFTGAN caching mechanisms for now.
         hift_cache_source = torch.zeros(1, 1, 0).to(self.device)
@@ -317,6 +358,8 @@ class S3Token2Wav(S3Token2Mel):
         flow_start_evt.record()
         output_mels = self.flow_inference(speech_tokens, ref_wav=ref_wav, ref_sr=ref_sr, ref_dict=ref_dict, finalize=finalize, n_timesteps=n_timesteps)
         flow_end_evt.record()
+
+        output_mels = self._gate_mel_silence(output_mels)
 
         hifigan_start_evt.record()
         output_wavs, output_sources = self.hift_inference(output_mels, cache_source)
@@ -419,6 +462,8 @@ class S3Token2Wav(S3Token2Mel):
         flow_end_evt.record()
         if isinstance(output_mels, tuple):
             output_mels = output_mels[0]
+
+        output_mels = self._gate_mel_silence(output_mels)
 
         # Run batched HiFiGAN inference (mel-to-wav)
         hifigan_start_evt.record()
