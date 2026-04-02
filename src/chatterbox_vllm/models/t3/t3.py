@@ -650,7 +650,9 @@ class T3VllmModel(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
                 if len(past_tokens) == 0:
                     continue
 
-                logits[sample_idx] = state.step(logits[sample_idx])
+                # Pass last generated token for repetition detection
+                last_token = past_tokens[-1] - SPEECH_TOKEN_OFFSET if len(past_tokens) > 0 else None
+                logits[sample_idx] = state.step(logits[sample_idx], last_token_id=last_token)
 
         # Clean up alignment states for sequences no longer in the batch
         stale_ids = [sid for sid in self._alignment_states if sid not in active_seq_ids]
