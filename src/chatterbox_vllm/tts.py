@@ -688,7 +688,8 @@ class ChatterboxTTS:
             return gaps
 
         def _try_cut_at_gap(gap_start, gap_end):
-            """Check if audio after this gap is weaker than before it. Returns cut sample or None."""
+            """Check if audio after this gap is weaker or spectrally different from before it.
+            Returns cut sample or None."""
             if gap_start < 5:
                 return None
 
@@ -704,11 +705,32 @@ class ChatterboxTTS:
             if pre_energy > 0 and post_energy < pre_energy * 0.5:
                 cut_frame = gap_start + 2  # keep ~20ms of trailing silence
                 return min(cut_frame * frame_size, len(audio))
+
+            # Spectral check: detect low-frequency rumble by comparing
+            # zero-crossing rates. Speech has high ZCR, rumble has low ZCR.
+            if gap_end < n_frames - 2 and pre_energy > 0:
+                pre_start = max(0, gap_start - lookback) * frame_size
+                pre_end = gap_start * frame_size
+                post_start = gap_end * frame_size
+                pre_audio = audio[pre_start:pre_end]
+                post_audio = audio[post_start:]
+
+                if len(pre_audio) > sr * 0.05 and len(post_audio) > sr * 0.05:
+                    pre_zcr = np.mean(np.abs(np.diff(np.sign(pre_audio))) > 0)
+                    post_zcr = np.mean(np.abs(np.diff(np.sign(post_audio))) > 0)
+
+                    if pre_zcr > 0 and post_zcr < pre_zcr * 0.6:
+                        cut_frame = gap_start + 2
+                        print(f"[Trim] Spectral cut: pre_zcr={pre_zcr:.4f}, "
+                              f"post_zcr={post_zcr:.4f}")
+                        return min(cut_frame * frame_size, len(audio))
+
             return None
 
-        # Try two passes: first with strict silence, then with looser threshold
-        # to catch the quiet-but-not-silent transition zones.
-        for threshold, min_gap_ms in [(0.002, 60), (0.012, 100)]:
+        # Try three passes: strict silence, near-silence, and quiet-relative-to-speech.
+        # The third pass catches cases where the gap between speech and trailing
+        # junk has RMS ~0.01-0.03 (too high for the first two thresholds).
+        for threshold, min_gap_ms in [(0.002, 60), (0.012, 100), (0.025, 150)]:
             gaps = _find_gaps(threshold, min_gap_ms)
             if not gaps:
                 continue

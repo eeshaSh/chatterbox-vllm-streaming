@@ -7,12 +7,12 @@ ALIGNMENT_LAYER_IDX = 9
 # The model generates roughly this many speech tokens per text token.
 # These are used to estimate when to suppress/force EOS.
 MIN_SPEECH_PER_TEXT = 1.5  # Below this, suppress EOS (too early)
-MAX_SPEECH_PER_TEXT = 5    # Above this, force EOS (gibberish)
+MAX_SPEECH_PER_TEXT = 4    # Above this, force EOS (gibberish)
 
 # Soft EOS boost: progressively increase EOS logit between these ratios.
 # This nudges the model toward stopping naturally rather than generating
 # junk tokens that get vocoded into audible noise.
-SOFT_EOS_START = 3.0       # Start boosting EOS at this ratio
+SOFT_EOS_START = 2.5       # Start boosting EOS at this ratio
 SOFT_EOS_MAX_BOOST = 10.0  # Maximum logit boost added to EOS at MAX_SPEECH_PER_TEXT
 
 
