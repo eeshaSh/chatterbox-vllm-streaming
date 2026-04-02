@@ -647,20 +647,22 @@ class ChatterboxTTS:
         
     @staticmethod
     def _trim_trailing_silence(audio: np.ndarray, sr: int = 24000,
-                               frame_ms: int = 20, silence_threshold: float = 0.008,
-                               min_silence_ms: int = 200, fade_ms: int = 15) -> np.ndarray:
+                               frame_ms: int = 10, fade_ms: int = 15) -> np.ndarray:
         """Trim trailing non-speech audio from the final chunk.
 
         After T3 emits its stop token, the last vocoded chunk often contains
         junk audio (mid-freq artifacts, spurious bursts) past the actual speech.
-        This finds the last sustained speech region and trims everything after it,
-        with a short fade-out to avoid clicks.
+        The garbage can be loud, but there's typically a quiet region (not
+        necessarily true silence) between the real speech and the trailing noise.
+
+        Strategy: find quiet gaps at two thresholds (silence and near-silence),
+        scan from the end, and cut where post-gap audio is weaker than pre-gap.
 
         Only call this on the final chunk (when finalize=True).
         """
         frame_size = int(frame_ms / 1000 * sr)
         n_frames = len(audio) // frame_size
-        if n_frames == 0:
+        if n_frames < 10:
             return audio
 
         # Compute per-frame RMS
@@ -669,32 +671,64 @@ class ChatterboxTTS:
             for i in range(n_frames)
         ])
 
-        # Find the last frame that's clearly speech (above threshold)
-        speech_frames = np.where(frame_rms > silence_threshold)[0]
-        if len(speech_frames) == 0:
-            return audio  # all silence — don't trim
+        def _find_gaps(threshold, min_gap_ms):
+            min_gap_frames = max(int(min_gap_ms / frame_ms), 2)
+            is_quiet = frame_rms < threshold
+            gaps = []
+            i = 0
+            while i < n_frames:
+                if is_quiet[i]:
+                    gap_start = i
+                    while i < n_frames and is_quiet[i]:
+                        i += 1
+                    if i - gap_start >= min_gap_frames:
+                        gaps.append((gap_start, i))
+                else:
+                    i += 1
+            return gaps
 
-        last_speech_frame = speech_frames[-1]
+        def _try_cut_at_gap(gap_start, gap_end):
+            """Check if audio after this gap is weaker than before it. Returns cut sample or None."""
+            if gap_start < 5:
+                return None
 
-        # Add a short tail after the last speech frame (min_silence_ms)
-        tail_frames = int(min_silence_ms / frame_ms)
-        cut_frame = min(last_speech_frame + tail_frames, n_frames)
-        cut_sample = cut_frame * frame_size
+            lookback = min(int(500 / frame_ms), gap_start)
+            pre_energy = np.percentile(frame_rms[gap_start - lookback:gap_start], 75)
 
-        if cut_sample >= len(audio):
-            return audio  # nothing to trim
+            # If gap extends to end of audio, post-gap energy is ~0
+            if gap_end >= n_frames - 2:
+                post_energy = 0.0
+            else:
+                post_energy = np.percentile(frame_rms[gap_end:], 75)
 
-        # Apply a short fade-out at the cut point
-        fade_samples = min(int(fade_ms / 1000 * sr), cut_sample)
-        if fade_samples > 0:
-            fade_out = np.linspace(1.0, 0.0, fade_samples, dtype=audio.dtype)
-            audio[cut_sample - fade_samples:cut_sample] *= fade_out
+            if pre_energy > 0 and post_energy < pre_energy * 0.5:
+                cut_frame = gap_start + 2  # keep ~20ms of trailing silence
+                return min(cut_frame * frame_size, len(audio))
+            return None
 
-        trimmed = audio[:cut_sample]
-        trimmed_ms = (len(audio) - len(trimmed)) / sr * 1000
-        if trimmed_ms > 50:
-            print(f"[Trim] Removed {trimmed_ms:.0f}ms trailing audio from final chunk")
-        return trimmed
+        # Try two passes: first with strict silence, then with looser threshold
+        # to catch the quiet-but-not-silent transition zones.
+        for threshold, min_gap_ms in [(0.002, 60), (0.012, 100)]:
+            gaps = _find_gaps(threshold, min_gap_ms)
+            if not gaps:
+                continue
+
+            for gap_start, gap_end in reversed(gaps):
+                cut_sample = _try_cut_at_gap(gap_start, gap_end)
+                if cut_sample is not None:
+                    # Apply fade-out
+                    fade_samples = min(int(fade_ms / 1000 * sr), cut_sample)
+                    if fade_samples > 0:
+                        fade_out = np.linspace(1.0, 0.0, fade_samples, dtype=audio.dtype)
+                        audio[cut_sample - fade_samples:cut_sample] *= fade_out
+
+                    trimmed = audio[:cut_sample]
+                    trimmed_ms = (len(audio) - len(trimmed)) / sr * 1000
+                    if trimmed_ms > 50:
+                        print(f"[Trim] Removed {trimmed_ms:.0f}ms trailing audio from final chunk")
+                    return trimmed
+
+        return audio
 
     def _process_token_buffer(
         self,
