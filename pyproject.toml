@@ -30,6 +30,7 @@ dependencies = [
     "spacy-pkuseg",
     "pykakasi",
     "prometheus-client",
+    "noisereduce",
 ]
 
 [project.optional-dependencies]

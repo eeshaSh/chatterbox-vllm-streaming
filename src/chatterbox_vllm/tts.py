@@ -12,6 +12,7 @@ from vllm.sampling_params import RequestOutputKind
 from functools import lru_cache
 
 import librosa
+import noisereduce as nr
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -690,6 +691,13 @@ class ChatterboxTTS:
         else:
             audio_chunk = wav
 
+        # Spectral-gating noise reduction to suppress vocoder artifacts
+        audio_chunk = nr.reduce_noise(
+            y=audio_chunk, sr=self.sr,
+            stationary=True, prop_decrease=1.0,
+            n_std_thresh_stationary=1.5,
+        )
+
         if len(audio_chunk) == 0:
             return None, 0.0, False
 
@@ -762,6 +770,13 @@ class ChatterboxTTS:
             audio_chunk = wav[skip_samples:]
         else:
             audio_chunk = wav
+
+        # Spectral-gating noise reduction to suppress vocoder artifacts
+        audio_chunk = nr.reduce_noise(
+            y=audio_chunk, sr=self.sr,
+            stationary=True, prop_decrease=1.0,
+            n_std_thresh_stationary=1.5,
+        )
 
         if len(audio_chunk) == 0:
             return None, 0.0, False
