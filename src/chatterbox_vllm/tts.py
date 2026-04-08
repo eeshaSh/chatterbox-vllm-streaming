@@ -12,8 +12,8 @@ from vllm.sampling_params import RequestOutputKind
 from functools import lru_cache
 
 import librosa
-import noisereduce as nr
 import numpy as np
+from scipy.signal import butter, sosfilt
 import torch
 import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
@@ -39,6 +39,11 @@ from .metrics import (
 
 
 REPO_ID = "ResembleAI/chatterbox"
+
+# High-pass filter to remove low-frequency vocoder rumble (<80Hz).
+# Butterworth 4th-order, computed once at import time. Stateless per-chunk
+# via sosfilt (no inter-chunk memory needed).
+_HP_FILTER_SOS = butter(4, 80, btype='high', fs=24000, output='sos')
 
 @dataclass
 class Conditionals:
@@ -691,12 +696,8 @@ class ChatterboxTTS:
         else:
             audio_chunk = wav
 
-        # Spectral-gating noise reduction to suppress vocoder artifacts
-        audio_chunk = nr.reduce_noise(
-            y=audio_chunk, sr=self.sr,
-            stationary=True, prop_decrease=1.0,
-            n_std_thresh_stationary=1.5,
-        )
+        # High-pass filter to remove low-frequency vocoder rumble
+        audio_chunk = sosfilt(_HP_FILTER_SOS, audio_chunk).astype(audio_chunk.dtype)
 
         if len(audio_chunk) == 0:
             return None, 0.0, False
@@ -771,12 +772,8 @@ class ChatterboxTTS:
         else:
             audio_chunk = wav
 
-        # Spectral-gating noise reduction to suppress vocoder artifacts
-        audio_chunk = nr.reduce_noise(
-            y=audio_chunk, sr=self.sr,
-            stationary=True, prop_decrease=1.0,
-            n_std_thresh_stationary=1.5,
-        )
+        # High-pass filter to remove low-frequency vocoder rumble
+        audio_chunk = sosfilt(_HP_FILTER_SOS, audio_chunk).astype(audio_chunk.dtype)
 
         if len(audio_chunk) == 0:
             return None, 0.0, False
