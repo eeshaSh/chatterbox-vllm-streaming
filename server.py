@@ -28,7 +28,12 @@ VOICE_CLONE_MAP: dict[str, Path] = {
     # "tr": VOICE_CLONE_DIR / "real_person_turkish_clone_audio.wav",
     "tr": VOICE_CLONE_DIR / "slower_turkish_audio.wav",
     "no": VOICE_CLONE_DIR / "real_person_norwegian_clone_audio.wav"
+    "da": VOICE_CLONE_DIR / "danish_voice_clone.wav",
+    "ar": VOICE_CLONE_DIR / "arabic_voice_clone.wav",
+    "sv": VOICE_CLONE_DIR / "swedish_voice_clone.wav",
 }
+# NOTE: da, ar etc might have hyphenated iso tags
+# we should probably just use the prefix
 
 print("Loading multilingual model on cuda...")
 model = ChatterboxTTS.from_pretrained_multilingual()
