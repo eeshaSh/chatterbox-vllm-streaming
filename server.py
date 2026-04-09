@@ -27,7 +27,7 @@ VOICE_CLONE_MAP: dict[str, Path] = {
     # "no": VOICE_CLONE_DIR / "norwegian_voice_clone_female_2.wav",
     # "tr": VOICE_CLONE_DIR / "real_person_turkish_clone_audio.wav",
     "tr": VOICE_CLONE_DIR / "slower_turkish_audio.wav",
-    "no": VOICE_CLONE_DIR / "real_person_norwegian_clone_audio.wav"
+    "no": VOICE_CLONE_DIR / "real_person_norwegian_clone_audio.wav",
     "da": VOICE_CLONE_DIR / "danish_voice_clone.wav",
     "ar": VOICE_CLONE_DIR / "arabic_voice_clone.wav",
     "sv": VOICE_CLONE_DIR / "swedish_voice_clone.wav",
