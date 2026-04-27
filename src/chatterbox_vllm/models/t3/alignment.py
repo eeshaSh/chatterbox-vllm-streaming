@@ -42,8 +42,15 @@ class AlignmentState:
         """
         self.step_count += 1
 
+        # Log every step once we're past min_speech_tokens
+        if self.step_count > self.min_speech_tokens:
+            print(f"[Alignment] step={self.step_count}, min={self.min_speech_tokens}, "
+                  f"max={self.max_speech_tokens}, eos_logit={logits[self.eos_idx].item():.2f}")
+
         if self.step_count < self.min_speech_tokens:
             # Too early — suppress EOS to prevent premature stopping
+            if self.step_count <= 3:
+                print(f"[Alignment] step={self.step_count} — suppressing EOS (min={self.min_speech_tokens})")
             logits[self.eos_idx] = -2**15
         elif self.step_count >= self.max_speech_tokens:
             # Too late — force EOS to stop gibberish
