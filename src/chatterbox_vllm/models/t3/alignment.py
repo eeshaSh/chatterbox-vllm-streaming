@@ -9,6 +9,12 @@ ALIGNMENT_LAYER_IDX = 9
 MIN_SPEECH_PER_TEXT = 1.5  # Below this, suppress EOS (too early)
 MAX_SPEECH_PER_TEXT = 6    # Above this, force EOS (gibberish)
 
+# EOS logit sustained-high detection.
+# If the EOS logit stays above this threshold for this many consecutive steps,
+# the model wants to stop but keeps losing in the softmax — force EOS.
+EOS_LOGIT_THRESHOLD = 3.0
+EOS_LOGIT_SUSTAINED_STEPS = 10
+
 
 class AlignmentState:
     """Per-request alignment tracking state for vLLM.
@@ -22,6 +28,7 @@ class AlignmentState:
         self.text_token_count = text_token_count  # S
         self.eos_idx = eos_idx
         self.step_count = 0
+        self.eos_high_count = 0  # consecutive steps where eos_logit > threshold
 
         # Compute expected speech token bounds
         self.min_speech_tokens = text_token_count * MIN_SPEECH_PER_TEXT
@@ -59,5 +66,19 @@ class AlignmentState:
                       f"(max_speech={self.max_speech_tokens})")
             logits = -(2**15) * torch.ones_like(logits)
             logits[self.eos_idx] = 2**15
+        else:
+            # Middle zone — check if EOS logit is sustained-high
+            eos_logit = logits[self.eos_idx].item()
+            if eos_logit >= EOS_LOGIT_THRESHOLD:
+                self.eos_high_count += 1
+            else:
+                self.eos_high_count = 0
+
+            if self.eos_high_count >= EOS_LOGIT_SUSTAINED_STEPS:
+                print(f"[Alignment] SUSTAINED EOS DETECTED: eos_logit >= {EOS_LOGIT_THRESHOLD} "
+                      f"for {self.eos_high_count} consecutive steps at step {self.step_count}. "
+                      f"Forcing EOS.")
+                logits = -(2**15) * torch.ones_like(logits)
+                logits[self.eos_idx] = 2**15
 
         return logits
