@@ -905,15 +905,8 @@ class ChatterboxTTS:
                         if t3_first_token_time is None:
                             t3_first_token_time = now
                     token_buffer.extend(completion.token_ids)
-                    if n_new > 0:
-                        print(f"[TTS] +{n_new} tokens, buffer={len(token_buffer)}, "
-                              f"total={t3_token_count}, ids={completion.token_ids[-min(5, n_new):]}")
 
                 should_process = len(token_buffer) >= chunk_size or output.finished
-
-                if output.finished:
-                    print(f"[TTS] Generation FINISHED. Total tokens={t3_token_count}, "
-                          f"last 20 tokens={token_buffer[-20:]}")
 
                 if should_process and len(token_buffer) > 0:
                     chunk_start = time.monotonic()
