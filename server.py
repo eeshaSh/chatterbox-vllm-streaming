@@ -35,8 +35,6 @@ VOICE_CLONE_MAP: dict[str, Path] = {
     "ar-JO": VOICE_CLONE_DIR / "arabic_jordan_voice_clone.wav",
     "sv": VOICE_CLONE_DIR / "swedish_voice_clone.wav",
 }
-# NOTE: da, ar etc might have hyphenated iso tags
-# we should probably just use the prefix
 
 print("Loading multilingual model on cuda...")
 model = ChatterboxTTS.from_pretrained_multilingual()
@@ -95,11 +93,15 @@ async def audio_stream(
 
     ACTIVE_REQUESTS.inc()
 
-    # Resolve voice clone file from language, if one is mapped
+    # Resolve voice clone file from the full language tag (e.g. "ar-AE"),
+    # but only pass the prefix (e.g. "ar") to the model since it only
+    # supports the base language codes.
     audio_prompt_path = None
     voice_file = VOICE_CLONE_MAP.get(language_id)
     if voice_file is not None:
         audio_prompt_path = str(voice_file)
+
+    model_language_id = language_id.split("-")[0]
 
     try:
         if output_format == "wav":
@@ -108,7 +110,7 @@ async def audio_stream(
         async for audio_chunk, metrics in model.generate_stream(
             text=text,
             audio_prompt_path=audio_prompt_path,
-            language_id=language_id,
+            language_id=model_language_id,
             exaggeration=exaggeration,
             temperature=temperature,
             chunk_size=chunk_size,
