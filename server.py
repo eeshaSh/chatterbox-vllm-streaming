@@ -33,7 +33,7 @@ VOICE_CLONE_MAP: dict[str, Path] = {
     "ar": VOICE_CLONE_DIR / "arabic_uae_voice_clone.wav",
     "ar-AE": VOICE_CLONE_DIR / "arabic_uae_voice_clone.wav",
     "ar-SA": VOICE_CLONE_DIR / "arabic_saudi_voice_clone.wav",
-    "ar-JO": VOICE_CLONE_DIR / "arabic_jordan_voice_clone.wav",
+    "ar-JO": VOICE_CLONE_DIR / "jordanian_arabic_omar.wav",
     "sv": VOICE_CLONE_DIR / "swedish_voice_clone.wav",
 }
 
