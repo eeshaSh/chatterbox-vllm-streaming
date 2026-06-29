@@ -1,7 +1,7 @@
 import struct
 import time
 import numpy as np
-from fastapi import FastAPI, Query, Form
+from fastapi import FastAPI, Query, Form, UploadFile, File
 from fastapi.responses import StreamingResponse, JSONResponse
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from fastapi.responses import Response
@@ -36,6 +36,8 @@ VOICE_CLONE_MAP: dict[str, Path] = {
     "ar-JO": VOICE_CLONE_DIR / "jordanian_arabic_omar.wav",
     "sv": VOICE_CLONE_DIR / "swedish_voice_clone.wav",
 }
+# Snapshot of the defaults so we can tell them apart from runtime additions.
+_DEFAULT_CLONE_KEYS: set[str] = set(VOICE_CLONE_MAP)
 
 print("Loading multilingual model on cuda...")
 model = ChatterboxTTS.from_pretrained_multilingual()
@@ -174,6 +176,70 @@ async def audio_speech(request: SpeechRequest):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# ── Voice-clone management (runtime) ────────────────────────────────
+
+
+@app.get("/voice-clones")
+async def list_voice_clones():
+    """Return the current language_id → wav file mapping."""
+    return {
+        lang: {
+            "file": path.name,
+            "default": lang in _DEFAULT_CLONE_KEYS,
+        }
+        for lang, path in sorted(VOICE_CLONE_MAP.items())
+    }
+
+
+@app.post("/voice-clones")
+async def add_voice_clone(
+    language_id: str = Form(..., description="Language code to map, e.g. 'ar-JO'"),
+    file: UploadFile = File(..., description="WAV file for the voice clone"),
+):
+    """Upload a WAV file and register it as the voice clone for a language_id.
+
+    Overwrites any existing mapping for the same language_id.
+    The mapping lasts until the server is restarted.
+    """
+    if not file.filename or not file.filename.lower().endswith(".wav"):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Only .wav files are accepted"},
+        )
+
+    dest = VOICE_CLONE_DIR / file.filename
+    contents = await file.read()
+    dest.write_bytes(contents)
+
+    VOICE_CLONE_MAP[language_id] = dest
+    action = "replaced" if language_id in _DEFAULT_CLONE_KEYS else "added"
+    print(f"[VoiceClones] {action} clone for '{language_id}' → {dest.name}")
+
+    return {
+        "language_id": language_id,
+        "file": dest.name,
+        "action": action,
+        "clones": {k: v.name for k, v in sorted(VOICE_CLONE_MAP.items())},
+    }
+
+
+@app.delete("/voice-clones/{language_id}")
+async def remove_voice_clone(language_id: str):
+    """Remove a voice-clone mapping. The language will fall back to the default model voice."""
+    removed = VOICE_CLONE_MAP.pop(language_id, None)
+    if removed is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"No voice clone registered for '{language_id}'"},
+        )
+    print(f"[VoiceClones] removed clone for '{language_id}' (was {removed.name})")
+    return {
+        "language_id": language_id,
+        "removed_file": removed.name,
+        "clones": {k: v.name for k, v in sorted(VOICE_CLONE_MAP.items())},
+    }
 
 
 @app.get("/tts")
