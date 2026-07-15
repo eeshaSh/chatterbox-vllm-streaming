@@ -6,6 +6,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from fastapi.responses import Response
 from chatterbox_vllm.tts import ChatterboxTTS
+from chatterbox_vllm.text_utils import split_language_segments
 from chatterbox_vllm.metrics import (
     ACTIVE_REQUESTS,
     REQUEST_COUNT,
@@ -96,40 +97,43 @@ async def audio_stream(
 
     ACTIVE_REQUESTS.inc()
 
-    # Resolve voice clone file from the full language tag (e.g. "ar-AE"),
-    # but only pass the prefix (e.g. "ar") to the model since it only
-    # supports the base language codes.
+    # Resolve the voice clone file from the full request language tag
+    # (e.g. "ar-AE"). This stays CONSTANT across all segments so the speaker
+    # voice never changes, even when a segment is pronounced in another language.
     audio_prompt_path = None
     voice_file = VOICE_CLONE_MAP.get(language_id)
     if voice_file is not None:
         audio_prompt_path = str(voice_file)
 
-    model_language_id = language_id.split("-")[0]
+    # Split into per-language runs (base language + any <xx>...</xx> spans).
+    base_model_language_id = language_id.split("-")[0]
+    segments = split_language_segments(text, base_model_language_id)
 
     try:
         if output_format == "wav":
             yield make_wav_header(SAMPLE_RATE, NUM_CHANNELS, SAMPLE_WIDTH * 8)
 
-        async for audio_chunk, metrics in model.generate_stream(
-            text=text,
-            audio_prompt_path=audio_prompt_path,
-            language_id=model_language_id,
-            exaggeration=exaggeration,
-            temperature=temperature,
-            chunk_size=chunk_size,
-            diffusion_steps=diffusion_steps,
-        ):
-            audio_np = audio_chunk.squeeze().cpu().numpy()
-            audio_np = np.nan_to_num(audio_np, nan=0.0, posinf=0.0, neginf=0.0)
-            audio_np = np.clip(audio_np, -1.0, 1.0)
-            pcm_data = (audio_np * np.iinfo(np.int16).max).astype("<i2", copy=False).tobytes()
-            if not first_audio_sent:
-                ttfb = time.time() - request_start
-                print(f"[Server] TTFB (request → first audio byte): {ttfb:.3f}s")
-                TTFB_HISTOGRAM.observe(ttfb)
-                first_audio_sent = True
-            chunk_count += 1
-            yield pcm_data
+        for seg_language_id, seg_text in segments:
+            async for audio_chunk, metrics in model.generate_stream(
+                text=seg_text,
+                audio_prompt_path=audio_prompt_path,
+                language_id=seg_language_id.split("-")[0],
+                exaggeration=exaggeration,
+                temperature=temperature,
+                chunk_size=chunk_size,
+                diffusion_steps=diffusion_steps,
+            ):
+                audio_np = audio_chunk.squeeze().cpu().numpy()
+                audio_np = np.nan_to_num(audio_np, nan=0.0, posinf=0.0, neginf=0.0)
+                audio_np = np.clip(audio_np, -1.0, 1.0)
+                pcm_data = (audio_np * np.iinfo(np.int16).max).astype("<i2", copy=False).tobytes()
+                if not first_audio_sent:
+                    ttfb = time.time() - request_start
+                    print(f"[Server] TTFB (request → first audio byte): {ttfb:.3f}s")
+                    TTFB_HISTOGRAM.observe(ttfb)
+                    first_audio_sent = True
+                chunk_count += 1
+                yield pcm_data
     except Exception:
         status = "error"
         raise
