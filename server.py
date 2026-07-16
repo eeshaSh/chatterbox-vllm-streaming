@@ -34,7 +34,8 @@ VOICE_CLONE_MAP: dict[str, Path] = {
     "ar-AE": VOICE_CLONE_DIR / "arabic_uae_voice_clone.wav",
     "ar-SA": VOICE_CLONE_DIR / "arabic_saudi_voice_clone.wav",
     "ar-JO": VOICE_CLONE_DIR / "jordanian_arabic_omar.wav",
-    "sv": VOICE_CLONE_DIR / "swedish_voice_clone_teams.wav",
+    "sv": VOICE_CLONE_DIR / "spiller_swedish_slow.wav",
+    "sv-SE": VOICE_CLONE_DIR / "spiller_swedish_slow.wav",
 }
 # Snapshot of the defaults so we can tell them apart from runtime additions.
 _DEFAULT_CLONE_KEYS: set[str] = set(VOICE_CLONE_MAP)
