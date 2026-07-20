@@ -55,6 +55,62 @@ SAMPLE_RATE = model.sr  # 24000
 NUM_CHANNELS = 1
 SAMPLE_WIDTH = 2  # 16-bit PCM
 
+# ── Audio stitching helpers ─────────────────────────────────────────
+# When text is split into per-language segments (e.g. Swedish + an <en>
+# tagged word), each segment is generated independently.  Short segments
+# can produce ramp-up / ramp-down artefacts (grunts, clicks) at the
+# boundaries.  The helpers below trim leading/trailing silence from each
+# segment and crossfade neighbouring segments so the stitch is smooth.
+
+CROSSFADE_MS = 80  # ms of overlap between adjacent segments
+
+
+def _trim_silence(samples: np.ndarray, threshold_ratio: float = 0.03,
+                  frame_ms: int = 20, margin_ms: int = 30) -> np.ndarray:
+    """Trim leading and trailing near-silence from an int16 sample array."""
+    frame_size = int(SAMPLE_RATE * frame_ms / 1000)
+    n_frames = max(1, len(samples) // frame_size)
+    # Compute per-frame RMS
+    trimmed_len = n_frames * frame_size
+    frames = samples[:trimmed_len].reshape(n_frames, frame_size).astype(np.float64)
+    rms = np.sqrt(np.mean(frames ** 2, axis=1))
+    peak = rms.max()
+    if peak == 0:
+        return samples
+    threshold = peak * threshold_ratio
+
+    above = np.nonzero(rms >= threshold)[0]
+    if len(above) == 0:
+        return samples
+    margin = int(SAMPLE_RATE * margin_ms / 1000)
+    start = max(0, above[0] * frame_size - margin)
+    end = min(len(samples), (above[-1] + 1) * frame_size + margin)
+    return samples[start:end]
+
+
+def _crossfade_segments(segment_list: list[np.ndarray],
+                        crossfade_ms: int = CROSSFADE_MS) -> np.ndarray:
+    """Concatenate int16 sample arrays with a linear crossfade at each join."""
+    if not segment_list:
+        return np.array([], dtype=np.int16)
+    if len(segment_list) == 1:
+        return segment_list[0]
+
+    xfade = int(SAMPLE_RATE * crossfade_ms / 1000)
+    result = segment_list[0].astype(np.float64)
+
+    for seg in segment_list[1:]:
+        seg_f = seg.astype(np.float64)
+        overlap = min(xfade, len(result), len(seg_f))
+        if overlap <= 0:
+            result = np.concatenate([result, seg_f])
+            continue
+        ramp = np.linspace(0.0, 1.0, overlap)
+        result[-overlap:] = result[-overlap:] * (1.0 - ramp) + seg_f[:overlap] * ramp
+        result = np.concatenate([result, seg_f[overlap:]])
+
+    return np.clip(result, -32768, 32767).astype(np.int16)
+
 
 def make_wav_header(sample_rate: int, num_channels: int, bits_per_sample: int) -> bytes:
     """Create a WAV header for streaming (unknown data size)."""
@@ -109,11 +165,15 @@ async def audio_stream(
     base_model_language_id = language_id.split("-")[0]
     segments = split_language_segments(text, base_model_language_id)
 
+    multi_segment = len(segments) > 1
+
     try:
         if output_format == "wav":
             yield make_wav_header(SAMPLE_RATE, NUM_CHANNELS, SAMPLE_WIDTH * 8)
 
-        for seg_language_id, seg_text in segments:
+        if not multi_segment:
+            # ── Single segment: stream directly (no buffering needed) ──
+            seg_language_id, seg_text = segments[0]
             async for audio_chunk, metrics in model.generate_stream(
                 text=seg_text,
                 audio_prompt_path=audio_prompt_path,
@@ -134,12 +194,52 @@ async def audio_stream(
                     first_audio_sent = True
                 chunk_count += 1
                 yield pcm_data
+        else:
+            # ── Multiple segments: buffer, trim silence, crossfade ─────
+            # Each segment is generated fully, silence-trimmed, and then
+            # all segments are crossfade-stitched before yielding.  This
+            # removes ramp-up/ramp-down artefacts on short segments and
+            # smooths the transition between languages.
+            seg_samples: list[np.ndarray] = []
+            for seg_language_id, seg_text in segments:
+                seg_pcm_chunks: list[bytes] = []
+                async for audio_chunk, metrics in model.generate_stream(
+                    text=seg_text,
+                    audio_prompt_path=audio_prompt_path,
+                    language_id=seg_language_id.split("-")[0],
+                    exaggeration=exaggeration,
+                    temperature=temperature,
+                    chunk_size=chunk_size,
+                    diffusion_steps=diffusion_steps,
+                ):
+                    audio_np = audio_chunk.squeeze().cpu().numpy()
+                    audio_np = np.nan_to_num(audio_np, nan=0.0, posinf=0.0, neginf=0.0)
+                    audio_np = np.clip(audio_np, -1.0, 1.0)
+                    seg_pcm_chunks.append(
+                        (audio_np * np.iinfo(np.int16).max).astype("<i2", copy=False).tobytes()
+                    )
+                # Combine, convert to int16 array, and trim silence
+                raw = b"".join(seg_pcm_chunks)
+                samples = np.frombuffer(raw, dtype=np.int16).copy()
+                seg_samples.append(_trim_silence(samples))
+
+            # Crossfade-stitch and yield the final audio in one go.
+            final = _crossfade_segments(seg_samples)
+            pcm_data = final.tobytes()
+            if not first_audio_sent:
+                ttfb = time.time() - request_start
+                print(f"[Server] TTFB (request → first audio byte): {ttfb:.3f}s")
+                TTFB_HISTOGRAM.observe(ttfb)
+                first_audio_sent = True
+            chunk_count += 1
+            yield pcm_data
     except Exception:
         status = "error"
         raise
     finally:
         total_time = time.time() - request_start
-        print(f"[Server] Request complete: {chunk_count} chunks in {total_time:.2f}s")
+        n_segs = len(segments)
+        print(f"[Server] Request complete: {chunk_count} chunks, {n_segs} segments in {total_time:.2f}s")
         ACTIVE_REQUESTS.dec()
         REQUEST_COUNT.labels(status=status).inc()
         REQUEST_DURATION.observe(total_time)
